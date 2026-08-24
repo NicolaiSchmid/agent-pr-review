@@ -1,6 +1,7 @@
 import { defineSchedule } from "eve/schedules";
 import github from "../channels/github-connect.js";
 import { database } from "../lib/database.js";
+import { extractCompletedAssistantText } from "../lib/message-text.js";
 
 interface DeferredCiTask {
   id: string;
@@ -18,6 +19,26 @@ const release = async (taskId: string) => {
     set state = 'waiting_for_ci', updated_at = now()
     where id = ${taskId} and state = 'reviewing'
   `;
+};
+
+const reportedTerminalCi = async (
+  stream: ReadableStream<unknown>,
+): Promise<boolean> => {
+  let response = "";
+  const reader = stream.getReader();
+  for (;;) {
+    const { done, value: event } = await reader.read();
+    if (done) break;
+    if (
+      typeof event === "object" &&
+      event !== null &&
+      "type" in event &&
+      event.type === "message.completed"
+    ) {
+      response += extractCompletedAssistantText(event as Parameters<typeof extractCompletedAssistantText>[0]);
+    }
+  }
+  return /(?:^|\n)CI_TASK_STATE:\s*terminal\s*$/i.test(response.trim());
 };
 
 export default defineSchedule({
@@ -52,11 +73,12 @@ export default defineSchedule({
         await Promise.all(
           tasks.map(async (task) => {
             try {
-              await receive(github, {
+              const session = await receive(github, {
                 message: [
                   `Re-evaluate deferred CI task ${task.id} for exact head ${task.head_sha}.`,
                   "Read both Check Runs and legacy commit statuses with github_repository.",
-                  "If any required context is pending, defer this task again. Otherwise report the terminal CI outcome and continue the requested work.",
+                  "If any required context is pending, report that it remains deferred. Otherwise report the terminal CI outcome and continue the requested work.",
+                  "End your response with exactly CI_TASK_STATE: pending or CI_TASK_STATE: terminal on its own line.",
                 ].join("\n"),
                 target: {
                   owner: task.repository_owner,
@@ -69,6 +91,8 @@ export default defineSchedule({
                 },
                 auth: appAuth,
               });
+              const terminal = await reportedTerminalCi(await session.getEventStream());
+              if (!terminal) await release(task.id);
             } catch (error) {
               await release(task.id).catch(() => undefined);
               throw error;

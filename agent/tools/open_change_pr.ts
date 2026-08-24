@@ -88,14 +88,23 @@ export default defineTool({
           base: baseBranch,
           draft: true,
         });
-        return { ...pull, commitSha };
+        const created = await request<{
+          number: number;
+          html_url: string;
+          head: { sha: string };
+          draft: boolean;
+        }>("GET", `${root}/pulls/${pull.number}`);
+        await assertMatchingCommit(created.head.sha);
+        return { ...created, commitSha: created.head.sha };
       } catch (error) {
         const recovered = await existingPull(baseBranch);
         if (recovered) {
+          await assertMatchingCommit(recovered.head.sha);
           return {
             number: recovered.number,
             html_url: recovered.html_url,
             commitSha: recovered.head.sha,
+            draft: recovered.draft,
           };
         }
         if (createdRef && error instanceof GitHubRequestError) {
@@ -221,7 +230,7 @@ export default defineTool({
         url: pull.html_url,
         branch: input.branch,
         commitSha: pull.commitSha,
-        draft: true,
+        draft: pull.draft,
         recovered: true,
       };
     } catch (error) {
@@ -244,7 +253,7 @@ export default defineTool({
       url: pull.html_url,
       branch: input.branch,
       commitSha: commit.sha,
-      draft: true,
+      draft: pull.draft,
       recovered: false,
     };
   },
