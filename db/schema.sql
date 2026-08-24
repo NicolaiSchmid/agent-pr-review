@@ -18,10 +18,17 @@ create table if not exists conversations (
   conversation_key text not null unique,
   source text not null check (source in ('github', 'slack')),
   repository_id text,
+  repository_owner text,
+  repository_name text,
+  github_installation_id bigint,
   pull_request_number integer,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table conversations add column if not exists repository_owner text;
+alter table conversations add column if not exists repository_name text;
+alter table conversations add column if not exists github_installation_id bigint;
 
 create table if not exists tasks (
   id uuid primary key,
