@@ -65,7 +65,7 @@ export default defineSchedule({
               and c.repository_owner is not null
               and c.repository_name is not null
               and c.pull_request_number is not null
-            order by t.created_at
+            order by t.updated_at, t.created_at
             for update of t skip locked
             limit 25
           )
@@ -86,7 +86,7 @@ export default defineSchedule({
                   `Re-evaluate deferred CI task ${task.id} for exact head ${task.head_sha}.`,
                   "Read both Check Runs and legacy commit statuses with github_repository.",
                   "If any required context is pending, report that it remains deferred. Otherwise report the terminal CI outcome and continue the requested work.",
-                  "End your response with exactly CI_TASK_STATE: pending or CI_TASK_STATE: terminal on its own line.",
+                  `End with CI_TASK_ID: ${task.id} and then exactly CI_TASK_STATE: pending or CI_TASK_STATE: terminal on separate lines.`,
                 ].join("\n"),
                 target: {
                   owner: task.repository_owner,
