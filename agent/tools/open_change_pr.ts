@@ -4,6 +4,7 @@ import { defineTool } from "eve/tools";
 import { always } from "eve/tools/approval";
 import { z } from "zod";
 import { env } from "../lib/env.js";
+import { requireRepositoryPermission } from "../lib/repository-authorization.js";
 
 const githubAuth = connect({
   connector: env.githubConnector,
@@ -38,6 +39,7 @@ export default defineTool({
     }
 
     const { token } = await ctx.getToken(githubAuth);
+    await requireRepositoryPermission(ctx, token, input.owner, input.repo, "write");
     const root = `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}`;
     class GitHubRequestError extends Error {
       constructor(readonly status: number, message: string) {

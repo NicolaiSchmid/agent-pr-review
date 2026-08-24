@@ -21,6 +21,14 @@ const release = async (taskId: string) => {
   `;
 };
 
+const complete = async (taskId: string) => {
+  await database()`
+    update tasks
+    set state = 'completed', updated_at = now()
+    where id = ${taskId} and state = 'reviewing'
+  `;
+};
+
 const reportedTerminalCi = async (
   stream: ReadableStream<unknown>,
 ): Promise<boolean> => {
@@ -92,7 +100,8 @@ export default defineSchedule({
                 auth: appAuth,
               });
               const terminal = await reportedTerminalCi(await session.getEventStream());
-              if (!terminal) await release(task.id);
+              if (terminal) await complete(task.id);
+              else await release(task.id);
             } catch (error) {
               await release(task.id).catch(() => undefined);
               throw error;

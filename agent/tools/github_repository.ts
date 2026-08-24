@@ -3,6 +3,7 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { readResponseTextLimited } from "../lib/bounded-response.js";
 import { env } from "../lib/env.js";
+import { requireRepositoryPermission } from "../lib/repository-authorization.js";
 
 const githubAuth = connect({
   connector: env.githubConnector,
@@ -31,6 +32,7 @@ export default defineTool({
       throw new Error("File path must stay within the repository");
     }
     const { token } = await ctx.getToken(githubAuth);
+    await requireRepositoryPermission(ctx, token, input.owner, input.repo, "read");
     const root = `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}`;
     const path = (() => {
       switch (input.operation) {
