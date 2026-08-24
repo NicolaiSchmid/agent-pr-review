@@ -6,6 +6,10 @@ const read = (name: string): string | undefined => {
 export const env = {
   anthropicApiKey: read("ANTHROPIC_API_KEY"),
   anthropicModel: read("ANTHROPIC_MODEL") ?? "claude-fable-5",
+  githubConnector: read("GITHUB_CONNECTOR") ?? "github/eve",
+  slackConnector: read("SLACK_CONNECTOR") ?? "slack/eve",
+  agentBotName: read("AGENT_BOT_NAME") ?? "eve",
+  databaseUrl: read("DATABASE_URL"),
   githubToken: read("GITHUB_TOKEN"),
   githubSandboxToken: read("GITHUB_SANDBOX_TOKEN"),
   githubWebhookSecret: read("GITHUB_WEBHOOK_SECRET"),

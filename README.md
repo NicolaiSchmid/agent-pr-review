@@ -1,6 +1,17 @@
 # agent-pr-review
 
-A compact, repository-locked Eve agent that reviews pull requests for `NicolaiSchmid/nunc-immo`. It uses direct Anthropic BYOK (`claude-fable-5` by default), durable Eve sessions, Vercel Sandbox, one update-in-place progress comment, and evidence-gated inline findings.
+A steerable Eve engineering agent with an evidence-gated pull-request reviewer at its core. It uses direct Anthropic BYOK (`claude-fable-5` by default), durable Eve sessions, Vercel Sandbox, Vercel Connect-backed GitHub and Slack channels, CI lifecycle primitives, scoped long-term-memory contracts, and approval-gated draft PR creation.
+
+## Capability Status
+
+- Automated repository-locked review and safe inline publication: implemented.
+- GitHub `@mention` conversations through Vercel Connect: implemented; connector provisioning required.
+- Slack mentions, DMs, threaded continuation, and interactive approvals through Vercel Connect: implemented; connector provisioning required.
+- CI terminal-event continuation and task-state primitives: implemented. Full required-check discovery, settling windows, durable deadlines, and automatic deferral of the legacy webhook are the next orchestration increment.
+- User, repository, organization, and PR memory schemas, PostgreSQL adapter, retrieval, confirmed writes, provenance, and author-controlled forgetting: implemented. Apply `db/schema.sql` before enabling memory. Verified Slack-to-GitHub identity linking remains to be wired; until then Slack receives only its user-scoped memory.
+- Generic approval-gated draft PR creation for any connector-authorized repository, including this repository: implemented for complete file replacements. Sandbox-generated patch capture and automatic test-evidence attachment remain to be wired.
+
+Fable 5 is used at standard inference speed. Anthropic's literal `speed: "fast"` mode does not currently support Fable 5; do not enable that provider option until Anthropic adds support.
 
 ## Architecture
 
@@ -32,8 +43,29 @@ No runtime secret is needed to install, typecheck, test, or build. Runtime requi
 - `GITHUB_WEBHOOK_SECRET`: high-entropy webhook secret.
 - `GITHUB_TOKEN`: host-only GitHub credential used to read PR data and write comments/reviews.
 - `GITHUB_SANDBOX_TOKEN`: optional separate read-only credential retained by the host and brokered by the sandbox firewall only into HTTPS requests to `github.com`.
+- `GITHUB_CONNECTOR`: Vercel Connect GitHub connector UID, default `github/eve`.
+- `SLACK_CONNECTOR`: Vercel Connect Slack connector UID, default `slack/eve`.
+- `AGENT_BOT_NAME`: GitHub mention name created by the connector, default `eve`.
+- `DATABASE_URL`: PostgreSQL connection used for long-term memory and durable orchestration state.
 
 If `GITHUB_SANDBOX_TOKEN` is absent, scoped host tools provide the tree and file contents safely. That supports static review but not arbitrary Git commands or test execution. Set it for the intended full workflow.
+
+Provision and attach the Connect triggers to the native Eve channel routes:
+
+```bash
+vercel connect create github --name eve --triggers
+vercel connect attach github/eve --triggers --trigger-path /eve/v1/github
+vercel connect create slack --name eve --triggers
+vercel connect attach slack/eve --triggers --trigger-path /eve/v1/slack
+```
+
+The existing signed `/webhook` endpoint remains available during migration for automatic PR review. Connect-backed mentions use `/eve/v1/github`; Slack uses `/eve/v1/slack`.
+
+Apply the durable-state schema to the configured database before using memory:
+
+```bash
+psql "$DATABASE_URL" -f db/schema.sql
+```
 
 ## GitHub Configuration
 

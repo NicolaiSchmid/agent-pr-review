@@ -17,8 +17,10 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.36",
+    "@vercel/connect": "^1.0.0",
     "ai": "7.0.58",
     "eve": "0.22.0",
+    "postgres": "^3.4.9",
     "zod": "^4.1.13"
   },
   "devDependencies": {
