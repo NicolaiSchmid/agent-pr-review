@@ -15,7 +15,7 @@ export const taskStateSchema = z.enum([
 export type TaskState = z.infer<typeof taskStateSchema>;
 
 const transitions: Record<TaskState, ReadonlySet<TaskState>> = {
-  queued: new Set(["waiting_for_ci", "reviewing", "cancelled", "failed"]),
+  queued: new Set(["waiting_for_ci", "reviewing", "superseded", "cancelled", "failed"]),
   waiting_for_ci: new Set(["reviewing", "superseded", "cancelled", "failed"]),
   reviewing: new Set(["waiting_for_user", "publishing", "superseded", "cancelled", "failed"]),
   waiting_for_user: new Set(["reviewing", "superseded", "cancelled", "failed"]),

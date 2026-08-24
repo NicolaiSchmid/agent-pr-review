@@ -22,10 +22,6 @@ export const memoryContext = (ctx: SessionLike) => {
   const scopes: MemoryScope[] = [{ kind: "user", userId: auth.principalId }];
   const repositoryId = auth.attributes?.repository_id;
   if (auth.authenticator === "github-webhook" && typeof repositoryId === "string" && repositoryId) {
-    const organizationId = auth.attributes?.organization_id;
-    if (typeof organizationId === "string" && organizationId) {
-      scopes.push({ kind: "organization", organizationId });
-    }
     scopes.push({ kind: "repository", repositoryId });
     const pullRequest = Number(auth.attributes?.pull_request_number);
     if (Number.isInteger(pullRequest) && pullRequest > 0) {

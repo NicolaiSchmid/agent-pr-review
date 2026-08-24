@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { connect } from "@vercel/connect/eve";
 import { defineTool } from "eve/tools";
 import { always } from "eve/tools/approval";
@@ -68,16 +69,16 @@ export default defineTool({
     };
 
     const branchPath = input.branch.split("/").map(encodeURIComponent).join("/");
-    const listPulls = () => request<Array<{
+    const listPulls = (baseBranch?: string) => request<Array<{
       number: number;
       html_url: string;
       head: { sha: string };
       draft: boolean;
     }>>(
       "GET",
-      `${root}/pulls?state=open&head=${encodeURIComponent(`${input.owner}:${input.branch}`)}`,
+      `${root}/pulls?state=open&head=${encodeURIComponent(`${input.owner}:${input.branch}`)}${baseBranch ? `&base=${encodeURIComponent(baseBranch)}` : ""}`,
     );
-    const existingPull = async () => (await listPulls())[0];
+    const existingPull = async (baseBranch?: string) => (await listPulls(baseBranch))[0];
     const createPull = async (baseBranch: string, commitSha: string, createdRef: boolean) => {
       try {
         const pull = await request<{ number: number; html_url: string }>("POST", `${root}/pulls`, {
@@ -89,7 +90,7 @@ export default defineTool({
         });
         return { ...pull, commitSha };
       } catch (error) {
-        const recovered = await existingPull();
+        const recovered = await existingPull(baseBranch);
         if (recovered) {
           return {
             number: recovered.number,
@@ -112,8 +113,39 @@ export default defineTool({
 
     const repository = await request<{ default_branch: string }>("GET", root);
     const baseBranch = input.baseBranch ?? repository.default_branch;
-    const alreadyOpen = await existingPull();
+    const baseRef = await request<{ object: { sha: string } }>(
+      "GET",
+      `${root}/git/ref/heads/${baseBranch.split("/").map(encodeURIComponent).join("/")}`,
+    );
+    const fingerprint = createHash("sha256").update(JSON.stringify({
+      owner: input.owner.toLowerCase(),
+      repo: input.repo.toLowerCase(),
+      baseBranch,
+      baseSha: baseRef.object.sha,
+      branch: input.branch,
+      title: input.title,
+      body: input.body,
+      commitMessage: input.commitMessage,
+      files: input.files,
+    })).digest("hex");
+    const commitMessage = `${input.commitMessage}\n\nEve-Change-Fingerprint: ${fingerprint}`;
+    const assertMatchingCommit = async (sha: string) => {
+      const candidate = await request<{
+        message: string;
+        parents: Array<{ sha: string }>;
+      }>("GET", `${root}/git/commits/${sha}`);
+      if (
+        candidate.message !== commitMessage ||
+        candidate.parents[0]?.sha !== baseRef.object.sha
+      ) {
+        throw new Error(
+          `Branch ${input.branch} already exists but does not match this approved change`,
+        );
+      }
+    };
+    const alreadyOpen = await existingPull(baseBranch);
     if (alreadyOpen) {
+      await assertMatchingCommit(alreadyOpen.head.sha);
       return {
         owner: input.owner,
         repo: input.repo,
@@ -130,6 +162,7 @@ export default defineTool({
         "GET",
         `${root}/git/ref/heads/${branchPath}`,
       );
+      await assertMatchingCommit(existingRef.object.sha);
       const pull = await createPull(baseBranch, existingRef.object.sha, false);
       return {
         owner: input.owner,
@@ -144,10 +177,6 @@ export default defineTool({
     } catch (error) {
       if (!(error instanceof GitHubRequestError) || error.status !== 404) throw error;
     }
-    const baseRef = await request<{ object: { sha: string } }>(
-      "GET",
-      `${root}/git/ref/heads/${baseBranch.split("/").map(encodeURIComponent).join("/")}`,
-    );
     const baseCommit = await request<{ tree: { sha: string } }>(
       "GET",
       `${root}/git/commits/${baseRef.object.sha}`,
@@ -182,7 +211,7 @@ export default defineTool({
       tree: treeEntries,
     });
     const commit = await request<{ sha: string }>("POST", `${root}/git/commits`, {
-      message: input.commitMessage,
+      message: commitMessage,
       tree: tree.sha,
       parents: [baseRef.object.sha],
     });

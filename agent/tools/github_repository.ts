@@ -1,6 +1,7 @@
 import { connect } from "@vercel/connect/eve";
 import { defineTool } from "eve/tools";
 import { z } from "zod";
+import { readResponseTextLimited } from "../lib/bounded-response.js";
 import { env } from "../lib/env.js";
 
 const githubAuth = connect({
@@ -56,8 +57,7 @@ export default defineTool({
       throw new Error(`GitHub GET ${path} failed with ${response.status}: ${(await response.text()).slice(0, 500)}`);
     }
     if (input.operation === "read_file") {
-      const content = await response.text();
-      if (content.length > 500_000) throw new Error("File exceeds the 500 KB read limit");
+      const content = await readResponseTextLimited(response, 500_000);
       return { operation: input.operation, content };
     }
     return { operation: input.operation, data: await response.json() };

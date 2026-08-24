@@ -10,7 +10,7 @@ export default defineTool({
   description:
     "Save an explicitly requested durable fact or preference for the authenticated user or current GitHub repository/PR. Repository and PR writes are approval-gated and retain provenance.",
   inputSchema: z.object({
-    scope: z.enum(["user", "organization", "repository", "pull_request"]),
+    scope: z.enum(["user", "repository", "pull_request"]),
     content: z.string().min(1).max(8_000),
     tags: z.array(z.string().min(1).max(80)).max(20).default([]),
     sourceUrl: z.string().url().optional(),

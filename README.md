@@ -8,7 +8,7 @@ A steerable Eve engineering agent with an evidence-gated pull-request reviewer a
 - GitHub `@mention` conversations through Vercel Connect: implemented; connector provisioning required.
 - Slack mentions, DMs, threaded continuation, and interactive approvals through Vercel Connect: implemented; connector provisioning required.
 - CI terminal-event continuation and task-state primitives: implemented. Full required-check discovery, settling windows, durable deadlines, and automatic deferral of the legacy webhook are the next orchestration increment.
-- User, repository, organization, and PR memory schemas, PostgreSQL adapter, retrieval, confirmed writes, provenance, and author-controlled forgetting: implemented. Apply `db/schema.sql` before enabling memory. Verified Slack-to-GitHub identity linking remains to be wired; until then Slack receives only its user-scoped memory.
+- User, repository, and PR memory schemas, PostgreSQL adapter, retrieval, confirmed writes, provenance, and author-controlled forgetting: implemented. Apply `db/schema.sql` before enabling memory. Organization memory remains schema-only until verified organization membership and Slack-to-GitHub identity linking are wired; Slack receives only its user-scoped memory.
 - Generic approval-gated draft PR creation for any connector-authorized repository, including this repository: implemented for complete file replacements. Sandbox-generated patch capture and automatic test-evidence attachment remain to be wired.
 
 Fable 5 is used at standard inference speed. Anthropic's literal `speed: "fast"` mode does not currently support Fable 5; do not enable that provider option until Anthropic adds support.
