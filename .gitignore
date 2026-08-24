@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+.eve/
+.output/
+.vercel/
+.workflow-data/
+coverage/
+dist/
+node_modules/
+*.log
+*.tgz

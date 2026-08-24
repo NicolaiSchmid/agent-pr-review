@@ -1,0 +1,22 @@
+import { describe, expect, it } from "vitest";
+import { parseReviewResult } from "./result.js";
+
+const valid = {
+  version: 1,
+  summary: "No defects found.",
+  tests: [{ command: "pnpm test", result: "passed" }],
+  findings: [],
+};
+
+describe("parseReviewResult", () => {
+  it("parses raw and fenced JSON", () => {
+    expect(parseReviewResult(JSON.stringify(valid))).toEqual(valid);
+    expect(parseReviewResult(`Result:\n\`\`\`json\n${JSON.stringify(valid)}\n\`\`\``)).toEqual(valid);
+  });
+
+  it("rejects malformed contracts", () => {
+    expect(() => parseReviewResult('{"version":2,"summary":"x"}')).toThrow(
+      "valid review result",
+    );
+  });
+});

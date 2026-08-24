@@ -1,0 +1,30 @@
+{
+  "name": "agent-pr-review",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "build": "eve build",
+    "dev": "eve dev",
+    "info": "eve info",
+    "start": "eve start",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "verify": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "4.0.36",
+    "ai": "7.0.58",
+    "eve": "0.22.0",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  },
+  "packageManager": "pnpm@11.9.0"
+}
