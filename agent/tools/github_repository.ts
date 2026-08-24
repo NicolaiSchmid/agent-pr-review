@@ -38,24 +38,71 @@ export default defineTool({
         case "pull_request": return `${root}/pulls/${input.number}`;
         case "tree": return `${root}/git/trees/${encodeURIComponent(input.ref)}?recursive=1`;
         case "read_file": return `${root}/contents/${input.path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(input.ref)}`;
-        case "checks": return `${root}/commits/${encodeURIComponent(input.ref)}/check-runs?per_page=100`;
+        case "checks": return "";
       }
     })();
-    const response = await fetch(`https://api.github.com${path}`, {
-      headers: {
-        accept: input.operation === "read_file"
-          ? "application/vnd.github.raw+json"
-          : "application/vnd.github+json",
-        authorization: `Bearer ${token}`,
-        "user-agent": "eve-engineering-agent",
-        "x-github-api-version": "2022-11-28",
-      },
-      signal: ctx.abortSignal,
-    });
-    if (!response.ok) {
-      if (response.status === 401) ctx.requireAuth(githubAuth);
-      throw new Error(`GitHub GET ${path} failed with ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    const fetchGitHub = async (requestPath: string, accept = "application/vnd.github+json") => {
+      const response = await fetch(`https://api.github.com${requestPath}`, {
+        headers: {
+          accept,
+          authorization: `Bearer ${token}`,
+          "user-agent": "eve-engineering-agent",
+          "x-github-api-version": "2022-11-28",
+        },
+        signal: ctx.abortSignal,
+      });
+      if (!response.ok) {
+        if (response.status === 401) ctx.requireAuth(githubAuth);
+        throw new Error(`GitHub GET ${requestPath} failed with ${response.status}: ${(await response.text()).slice(0, 500)}`);
+      }
+      return response;
+    };
+    if (input.operation === "checks") {
+      const ref = encodeURIComponent(input.ref);
+      const checkRuns: unknown[] = [];
+      const statuses: unknown[] = [];
+      let checkRunTotal = 0;
+      let statusTotal = 0;
+      for (let page = 1; page <= 30; page += 1) {
+        const response = await fetchGitHub(
+          `${root}/commits/${ref}/check-runs?per_page=100&page=${page}`,
+        );
+        const body = await response.json() as { total_count: number; check_runs: unknown[] };
+        checkRunTotal = body.total_count;
+        checkRuns.push(...body.check_runs);
+        if (checkRuns.length >= checkRunTotal || body.check_runs.length < 100) break;
+      }
+      if (checkRuns.length < checkRunTotal) {
+        throw new Error(`GitHub check-run pagination stopped at ${checkRuns.length} of ${checkRunTotal}`);
+      }
+      for (let page = 1; page <= 30; page += 1) {
+        const response = await fetchGitHub(
+          `${root}/commits/${ref}/status?per_page=100&page=${page}`,
+        );
+        const body = await response.json() as { total_count: number; statuses: unknown[] };
+        statusTotal = body.total_count;
+        statuses.push(...body.statuses);
+        if (statuses.length >= statusTotal || body.statuses.length < 100) break;
+      }
+      if (statuses.length < statusTotal) {
+        throw new Error(`GitHub status pagination stopped at ${statuses.length} of ${statusTotal}`);
+      }
+      return {
+        operation: input.operation,
+        data: {
+          check_runs: checkRuns,
+          check_run_total_count: checkRunTotal,
+          statuses,
+          status_total_count: statusTotal,
+        },
+      };
     }
+    const response = await fetchGitHub(
+      path,
+      input.operation === "read_file"
+        ? "application/vnd.github.raw+json"
+        : "application/vnd.github+json",
+    );
     if (input.operation === "read_file") {
       const content = await readResponseTextLimited(response, 500_000);
       return { operation: input.operation, content };

@@ -33,19 +33,26 @@ export default githubChannel({
     ) {
       return null;
     }
-    let deferred: Array<{ id: string }>;
-    try {
-      deferred = await database()<Array<{ id: string }>>`
-        select id from tasks
-        where repository_id = ${String(ctx.repository.id)}
-          and head_sha = ${suite.headSha}
-          and state = 'waiting_for_ci'
+    const claimed = await database()<Array<{ id: string }>>`
+      with candidate as (
+        select t.id
+        from tasks t
+        join conversations c on c.id = t.conversation_id
+        where t.repository_id = ${String(ctx.repository.id)}
+          and t.head_sha = ${suite.headSha}
+          and t.state = 'waiting_for_ci'
+          and c.pull_request_number = any(${suite.pullRequests})
+        order by t.created_at
+        for update of t skip locked
         limit 1
-      `;
-    } catch {
-      return null;
-    }
-    if (deferred.length === 0) return null;
+      )
+      update tasks t
+      set state = 'reviewing', updated_at = now()
+      from candidate
+      where t.id = candidate.id and t.state = 'waiting_for_ci'
+      returning t.id
+    `;
+    if (claimed.length === 0) return null;
     return {
       auth: defaultGitHubAuth(ctx),
       context: [

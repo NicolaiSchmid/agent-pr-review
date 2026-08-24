@@ -73,7 +73,7 @@ create table if not exists memory_records (
 );
 
 create index if not exists memory_records_scope
-  on memory_records(scope_kind, scope_key, status);
+  on memory_records(scope_key, status);
 
 create table if not exists approval_requests (
   id uuid primary key,

@@ -129,14 +129,64 @@ export default defineTool({
       files: input.files,
     })).digest("hex");
     const commitMessage = `${input.commitMessage}\n\nEve-Change-Fingerprint: ${fingerprint}`;
+    const baseCommit = await request<{ tree: { sha: string } }>(
+      "GET",
+      `${root}/git/commits/${baseRef.object.sha}`,
+    );
+    const baseTree = await request<{
+      truncated: boolean;
+      tree: Array<{ path: string; mode: string; type: string }>;
+    }>("GET", `${root}/git/trees/${baseCommit.tree.sha}?recursive=1`);
+    if (baseTree.truncated) {
+      throw new Error("GitHub returned a truncated base tree; refusing to guess file modes");
+    }
+    const entries = new Map(baseTree.tree.map((entry) => [entry.path, entry]));
+    for (const file of input.files) {
+      const existing = entries.get(file.path);
+      if (existing && existing.type !== "blob") {
+        throw new Error(`Replacement path ${file.path} is an existing ${existing.type}`);
+      }
+      const segments = file.path.split("/");
+      for (let index = 1; index < segments.length; index += 1) {
+        const ancestor = entries.get(segments.slice(0, index).join("/"));
+        if (ancestor && ancestor.type !== "tree") {
+          throw new Error(`Replacement path ${file.path} descends from an existing ${ancestor.type}`);
+        }
+      }
+      if (input.files.some(
+        (candidate) => candidate.path !== file.path &&
+          (candidate.path.startsWith(`${file.path}/`) || file.path.startsWith(`${candidate.path}/`)),
+      )) {
+        throw new Error("Replacement paths cannot be ancestors or descendants of each other");
+      }
+    }
+    const treeEntries = [];
+    for (const file of input.files) {
+      const blob = await request<{ sha: string }>("POST", `${root}/git/blobs`, {
+        content: file.content,
+        encoding: "utf-8",
+      });
+      treeEntries.push({
+        path: file.path,
+        mode: entries.get(file.path)?.mode ?? "100644",
+        type: "blob",
+        sha: blob.sha,
+      });
+    }
+    const tree = await request<{ sha: string }>("POST", `${root}/git/trees`, {
+      base_tree: baseCommit.tree.sha,
+      tree: treeEntries,
+    });
     const assertMatchingCommit = async (sha: string) => {
       const candidate = await request<{
         message: string;
         parents: Array<{ sha: string }>;
+        tree: { sha: string };
       }>("GET", `${root}/git/commits/${sha}`);
       if (
         candidate.message !== commitMessage ||
-        candidate.parents[0]?.sha !== baseRef.object.sha
+        candidate.parents[0]?.sha !== baseRef.object.sha ||
+        candidate.tree.sha !== tree.sha
       ) {
         throw new Error(
           `Branch ${input.branch} already exists but does not match this approved change`,
@@ -177,39 +227,6 @@ export default defineTool({
     } catch (error) {
       if (!(error instanceof GitHubRequestError) || error.status !== 404) throw error;
     }
-    const baseCommit = await request<{ tree: { sha: string } }>(
-      "GET",
-      `${root}/git/commits/${baseRef.object.sha}`,
-    );
-    const baseTree = await request<{
-      truncated: boolean;
-      tree: Array<{ path: string; mode: string; type: string }>;
-    }>("GET", `${root}/git/trees/${baseCommit.tree.sha}?recursive=1`);
-    if (baseTree.truncated) {
-      throw new Error("GitHub returned a truncated base tree; refusing to guess file modes");
-    }
-    const modes = new Map(
-      baseTree.tree
-        .filter((entry) => entry.type === "blob")
-        .map((entry) => [entry.path, entry.mode]),
-    );
-    const treeEntries = [];
-    for (const file of input.files) {
-      const blob = await request<{ sha: string }>("POST", `${root}/git/blobs`, {
-        content: file.content,
-        encoding: "utf-8",
-      });
-      treeEntries.push({
-        path: file.path,
-        mode: modes.get(file.path) ?? "100644",
-        type: "blob",
-        sha: blob.sha,
-      });
-    }
-    const tree = await request<{ sha: string }>("POST", `${root}/git/trees`, {
-      base_tree: baseCommit.tree.sha,
-      tree: treeEntries,
-    });
     const commit = await request<{ sha: string }>("POST", `${root}/git/commits`, {
       message: commitMessage,
       tree: tree.sha,
