@@ -9,7 +9,9 @@ export const checkSchema = z.object({
 export type Check = z.infer<typeof checkSchema>;
 
 export const summarizeChecks = (checks: Check[]) => {
-  const pending = checks.filter((check) => check.status !== "completed");
+  const pending = checks.filter(
+    (check) => check.status !== "completed" || check.conclusion === null,
+  );
   const failed = checks.filter(
     (check) =>
       check.status === "completed" &&

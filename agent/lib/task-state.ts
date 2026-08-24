@@ -18,7 +18,7 @@ const transitions: Record<TaskState, ReadonlySet<TaskState>> = {
   queued: new Set(["waiting_for_ci", "reviewing", "cancelled", "failed"]),
   waiting_for_ci: new Set(["reviewing", "superseded", "cancelled", "failed"]),
   reviewing: new Set(["waiting_for_user", "publishing", "superseded", "cancelled", "failed"]),
-  waiting_for_user: new Set(["reviewing", "cancelled", "failed"]),
+  waiting_for_user: new Set(["reviewing", "superseded", "cancelled", "failed"]),
   publishing: new Set(["completed", "superseded", "failed"]),
   completed: new Set(),
   superseded: new Set(),

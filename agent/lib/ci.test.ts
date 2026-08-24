@@ -18,4 +18,10 @@ describe("CI aggregation", () => {
       failed: [{ name: "test", conclusion: "failure" }],
     });
   });
+
+  it("keeps completed checks without a conclusion unresolved", () => {
+    expect(summarizeChecks([
+      { name: "deploy", status: "completed", conclusion: null },
+    ])).toEqual({ terminal: false, pending: ["deploy"], failed: [] });
+  });
 });

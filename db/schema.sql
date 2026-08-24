@@ -37,7 +37,7 @@ create table if not exists tasks (
 );
 
 create unique index if not exists tasks_active_review_head
-  on tasks(repository_id, head_sha)
+  on tasks(conversation_id, head_sha)
   where kind = 'pr_review' and state not in ('completed', 'superseded', 'failed', 'cancelled');
 
 create table if not exists event_deliveries (

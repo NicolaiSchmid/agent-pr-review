@@ -17,7 +17,6 @@ const inputSchema = z.object({
   title: z.string().min(1).max(256),
   body: z.string().min(1).max(60_000),
   commitMessage: z.string().min(1).max(256),
-  draft: z.boolean().default(true),
   files: z.array(z.object({
     path: z.string().min(1).max(1_000),
     content: z.string().max(200_000),
@@ -39,6 +38,11 @@ export default defineTool({
 
     const { token } = await ctx.getToken(githubAuth);
     const root = `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}`;
+    class GitHubRequestError extends Error {
+      constructor(readonly status: number, message: string) {
+        super(message);
+      }
+    }
     const request = async <T = Record<string, unknown>>(method: string, path: string, body?: unknown) => {
       const response = await fetch(`https://api.github.com${path}`, {
         method,
@@ -54,13 +58,92 @@ export default defineTool({
       });
       if (!response.ok) {
         if (response.status === 401) ctx.requireAuth(githubAuth);
-        throw new Error(`GitHub ${method} ${path} failed with ${response.status}: ${(await response.text()).slice(0, 500)}`);
+        throw new GitHubRequestError(
+          response.status,
+          `GitHub ${method} ${path} failed with ${response.status}: ${(await response.text()).slice(0, 500)}`,
+        );
       }
+      if (response.status === 204) return undefined as T;
       return (await response.json()) as T;
+    };
+
+    const branchPath = input.branch.split("/").map(encodeURIComponent).join("/");
+    const listPulls = () => request<Array<{
+      number: number;
+      html_url: string;
+      head: { sha: string };
+      draft: boolean;
+    }>>(
+      "GET",
+      `${root}/pulls?state=open&head=${encodeURIComponent(`${input.owner}:${input.branch}`)}`,
+    );
+    const existingPull = async () => (await listPulls())[0];
+    const createPull = async (baseBranch: string, commitSha: string, createdRef: boolean) => {
+      try {
+        const pull = await request<{ number: number; html_url: string }>("POST", `${root}/pulls`, {
+          title: input.title,
+          body: input.body,
+          head: input.branch,
+          base: baseBranch,
+          draft: true,
+        });
+        return { ...pull, commitSha };
+      } catch (error) {
+        const recovered = await existingPull();
+        if (recovered) {
+          return {
+            number: recovered.number,
+            html_url: recovered.html_url,
+            commitSha: recovered.head.sha,
+          };
+        }
+        if (createdRef && error instanceof GitHubRequestError) {
+          const current = await request<{ object: { sha: string } }>(
+            "GET",
+            `${root}/git/ref/heads/${branchPath}`,
+          );
+          if (current.object.sha === commitSha) {
+            await request("DELETE", `${root}/git/refs/heads/${branchPath}`);
+          }
+        }
+        throw error;
+      }
     };
 
     const repository = await request<{ default_branch: string }>("GET", root);
     const baseBranch = input.baseBranch ?? repository.default_branch;
+    const alreadyOpen = await existingPull();
+    if (alreadyOpen) {
+      return {
+        owner: input.owner,
+        repo: input.repo,
+        number: alreadyOpen.number,
+        url: alreadyOpen.html_url,
+        branch: input.branch,
+        commitSha: alreadyOpen.head.sha,
+        draft: alreadyOpen.draft,
+        recovered: true,
+      };
+    }
+    try {
+      const existingRef = await request<{ object: { sha: string } }>(
+        "GET",
+        `${root}/git/ref/heads/${branchPath}`,
+      );
+      const pull = await createPull(baseBranch, existingRef.object.sha, false);
+      return {
+        owner: input.owner,
+        repo: input.repo,
+        number: pull.number,
+        url: pull.html_url,
+        branch: input.branch,
+        commitSha: pull.commitSha,
+        draft: true,
+        recovered: true,
+      };
+    } catch (error) {
+      if (!(error instanceof GitHubRequestError) || error.status !== 404) throw error;
+    }
     const baseRef = await request<{ object: { sha: string } }>(
       "GET",
       `${root}/git/ref/heads/${baseBranch.split("/").map(encodeURIComponent).join("/")}`,
@@ -69,13 +152,30 @@ export default defineTool({
       "GET",
       `${root}/git/commits/${baseRef.object.sha}`,
     );
+    const baseTree = await request<{
+      truncated: boolean;
+      tree: Array<{ path: string; mode: string; type: string }>;
+    }>("GET", `${root}/git/trees/${baseCommit.tree.sha}?recursive=1`);
+    if (baseTree.truncated) {
+      throw new Error("GitHub returned a truncated base tree; refusing to guess file modes");
+    }
+    const modes = new Map(
+      baseTree.tree
+        .filter((entry) => entry.type === "blob")
+        .map((entry) => [entry.path, entry.mode]),
+    );
     const treeEntries = [];
     for (const file of input.files) {
       const blob = await request<{ sha: string }>("POST", `${root}/git/blobs`, {
         content: file.content,
         encoding: "utf-8",
       });
-      treeEntries.push({ path: file.path, mode: "100644", type: "blob", sha: blob.sha });
+      treeEntries.push({
+        path: file.path,
+        mode: modes.get(file.path) ?? "100644",
+        type: "blob",
+        sha: blob.sha,
+      });
     }
     const tree = await request<{ sha: string }>("POST", `${root}/git/trees`, {
       base_tree: baseCommit.tree.sha,
@@ -90,13 +190,7 @@ export default defineTool({
       ref: `refs/heads/${input.branch}`,
       sha: commit.sha,
     });
-    const pull = await request<{ number: number; html_url: string }>("POST", `${root}/pulls`, {
-      title: input.title,
-      body: input.body,
-      head: input.branch,
-      base: baseBranch,
-      draft: input.draft,
-    });
+    const pull = await createPull(baseBranch, commit.sha, true);
     return {
       owner: input.owner,
       repo: input.repo,
@@ -104,7 +198,8 @@ export default defineTool({
       url: pull.html_url,
       branch: input.branch,
       commitSha: commit.sha,
-      draft: input.draft,
+      draft: true,
+      recovered: false,
     };
   },
 });

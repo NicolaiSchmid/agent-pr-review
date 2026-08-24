@@ -5,6 +5,7 @@ describe("task lifecycle", () => {
   it("supports CI deferral and immutable head passes", () => {
     expect(canTransitionTask("queued", "waiting_for_ci")).toBe(true);
     expect(transitionTask("waiting_for_ci", "reviewing")).toBe("reviewing");
+    expect(transitionTask("waiting_for_user", "superseded")).toBe("superseded");
     expect(() => transitionTask("completed", "reviewing")).toThrow();
     const conversation = reviewConversationKey({
       installationId: "42",
