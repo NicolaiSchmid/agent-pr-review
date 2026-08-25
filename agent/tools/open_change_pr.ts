@@ -141,10 +141,10 @@ export default defineTool({
           const created = await request<{ head: { sha: string }; state: string }>(
             "GET", `${root}/pulls/${createdPullNumber}`,
           );
-          if (created.state === "open" && created.head.sha !== commitSha) {
+          if (created.state === "open") {
             await request("PATCH", `${root}/pulls/${createdPullNumber}`, { state: "closed" });
-            throw error;
           }
+          throw error;
         }
         const recovered = await existingPull(baseBranch);
         if (recovered) {
