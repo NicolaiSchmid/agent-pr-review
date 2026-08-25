@@ -163,8 +163,10 @@ export default defineTool({
             throw new Error("Refusing to recover a pull request with different title or body");
           }
           await claimOperationPull(recovered.number);
+          let validatedRecovered;
           try {
             await assertMatchingCommit(recovered.head.sha, await liveBaseSha());
+            validatedRecovered = await revalidateRecoveredPull(recovered.number, recovered.head.sha);
           } catch (validationError) {
             if (validationError instanceof CommitMismatchError && operationOwnsPull(recovered)) {
               await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
@@ -172,10 +174,10 @@ export default defineTool({
             throw validationError;
           }
           return {
-            number: recovered.number,
-            html_url: recovered.html_url,
-            commitSha: recovered.head.sha,
-            draft: recovered.draft,
+            number: validatedRecovered.number,
+            html_url: validatedRecovered.html_url,
+            commitSha: validatedRecovered.head.sha,
+            draft: validatedRecovered.draft,
           };
         }
         throw error;
@@ -315,6 +317,27 @@ export default defineTool({
         );
       }
     };
+    const revalidateRecoveredPull = async (number: number, expectedHead: string) => {
+      const pull = await request<{
+        number: number;
+        html_url: string;
+        head: { sha: string };
+        base: { ref: string };
+        state: string;
+        draft: boolean;
+        title: string;
+        body: string | null;
+      }>("GET", `${root}/pulls/${number}`);
+      if (
+        pull.state !== "open" || !pull.draft || pull.base.ref !== baseBranch ||
+        pull.title !== input.title || (pull.body ?? "") !== operationBody ||
+        pull.head.sha.toLowerCase() !== expectedHead.toLowerCase()
+      ) {
+        throw new CreatedPullInvariantError("Recovered pull request changed during validation");
+      }
+      await assertMatchingCommit(pull.head.sha, await liveBaseSha());
+      return pull;
+    };
     const alreadyOpen = await existingPull(baseBranch);
     if (alreadyOpen) {
       if (!alreadyOpen.draft) throw new Error("Refusing to recover a pull request that is no longer a draft");
@@ -322,8 +345,10 @@ export default defineTool({
         throw new Error("Refusing to recover a pull request with different title or body");
       }
       await claimOperationPull(alreadyOpen.number);
+      let validatedOpen;
       try {
         await assertMatchingCommit(alreadyOpen.head.sha, await liveBaseSha());
+        validatedOpen = await revalidateRecoveredPull(alreadyOpen.number, alreadyOpen.head.sha);
       } catch (validationError) {
         if (validationError instanceof CommitMismatchError && operationOwnsPull(alreadyOpen)) {
           await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
@@ -333,11 +358,11 @@ export default defineTool({
       return {
         owner: input.owner,
         repo: input.repo,
-        number: alreadyOpen.number,
-        url: alreadyOpen.html_url,
+        number: validatedOpen.number,
+        url: validatedOpen.html_url,
         branch: input.branch,
-        commitSha: alreadyOpen.head.sha,
-        draft: alreadyOpen.draft,
+        commitSha: validatedOpen.head.sha,
+        draft: validatedOpen.draft,
         recovered: true,
       };
     }
