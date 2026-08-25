@@ -94,17 +94,25 @@ export default defineTool({
     };
 
     const branchPath = input.branch.split("/").map(encodeURIComponent).join("/");
-    const listPulls = (baseBranch?: string) => request<Array<{
+    type ListedPull = {
       number: number;
       html_url: string;
       head: { sha: string };
       draft: boolean;
       title: string;
       body: string | null;
-    }>>(
-      "GET",
-      `${root}/pulls?state=open&head=${encodeURIComponent(`${input.owner}:${input.branch}`)}${baseBranch ? `&base=${encodeURIComponent(baseBranch)}` : ""}`,
-    );
+    };
+    const listPulls = async (baseBranch?: string) => {
+      const pulls: ListedPull[] = [];
+      for (let page = 1; ; page += 1) {
+        const batch = await request<ListedPull[]>(
+          "GET",
+          `${root}/pulls?state=open&head=${encodeURIComponent(`${input.owner}:${input.branch}`)}${baseBranch ? `&base=${encodeURIComponent(baseBranch)}` : ""}&per_page=100&page=${page}`,
+        );
+        pulls.push(...batch);
+        if (batch.length < 100) return pulls;
+      }
+    };
     const existingPull = async (baseBranch?: string) => (await listPulls(baseBranch))[0];
     const createPull = async (baseBranch: string, commitSha: string) => {
       let createdPullNumber: number | undefined;
@@ -172,7 +180,10 @@ export default defineTool({
           }
           throw error;
         }
-        const recovered = await existingPull();
+        const recoveryPulls = await listPulls();
+        const recovered = recoveryPulls.find((candidate) =>
+          (candidate.body ?? "") === operationBody
+        ) ?? recoveryPulls[0];
         if (recovered) {
           if (!recovered.draft) {
             if (operation.pull_request_number === recovered.number) {
@@ -362,8 +373,9 @@ export default defineTool({
       await assertMatchingCommit(pull.head.sha, await liveBaseSha());
       return pull;
     };
+    const openPulls = operation.pull_request_number === null ? await listPulls() : [];
     const alreadyOpen = operation.pull_request_number === null
-      ? await existingPull(baseBranch)
+      ? openPulls.find((pull) => (pull.body ?? "") === operationBody) ?? openPulls[0]
       : await request<{
           number: number;
           html_url: string;

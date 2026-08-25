@@ -194,7 +194,30 @@ export default githubChannel({
         const suffix = `${truncated ? "\n\n_Output truncated to fit one GitHub comment._" : ""}\n\n${marker}`;
         const body = `${data.message.slice(0, 60_000 - suffix.length)}${suffix}`;
         if (channel.thread.kind === "review_thread") {
-          await channel.thread.post(body);
+          let existingCommentId: number | undefined;
+          if (channel.state.pullRequestNumber) {
+            for (let page = 1; !existingCommentId; page += 1) {
+              const comments = await channel.github.request<Array<{
+                id: number; body?: string; user?: { login?: string; type?: string };
+              }>>({
+                method: "GET",
+                path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/pulls/${channel.state.pullRequestNumber}/comments?per_page=100&page=${page}`,
+              });
+              existingCommentId = comments.body.find(
+                (comment) => isAgentBot(comment.user) && comment.body?.includes(marker),
+              )?.id;
+              if (comments.body.length < 100) break;
+            }
+          }
+          if (existingCommentId) {
+            await channel.github.request({
+              method: "PATCH",
+              path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/pulls/comments/${existingCommentId}`,
+              body: { body },
+            });
+          } else {
+            await channel.thread.post(body);
+          }
           return;
         }
         let existingCommentId: number | undefined;
