@@ -83,9 +83,12 @@ const cleanupStaleResult = async (
     }>;
     const existing = comments.find((comment) => {
       const login = comment.user?.login?.toLowerCase();
-      const owned = comment.user?.type === "Bot" && !!login &&
-        (login === env.githubBotLogin || login === env.agentBotName.toLowerCase() ||
-          login === `${env.agentBotName.toLowerCase()}[bot]`);
+      const owned = !!login && (
+        (!!env.githubBotLogin && login === env.githubBotLogin) ||
+        (comment.user?.type === "Bot" &&
+          (login === env.agentBotName.toLowerCase() ||
+            login === `${env.agentBotName.toLowerCase()}[bot]`))
+      );
       return owned && comment.body?.includes(marker);
     });
     if (existing) {

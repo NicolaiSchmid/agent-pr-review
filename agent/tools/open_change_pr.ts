@@ -346,8 +346,21 @@ export default defineTool({
       await assertMatchingCommit(pull.head.sha, await liveBaseSha());
       return pull;
     };
-    const alreadyOpen = await existingPull(baseBranch);
+    const alreadyOpen = operation.pull_request_number === null
+      ? await existingPull(baseBranch)
+      : await request<{
+          number: number;
+          html_url: string;
+          head: { sha: string };
+          draft: boolean;
+          title: string;
+          body: string | null;
+          state: string;
+        }>("GET", `${root}/pulls/${operation.pull_request_number}`);
     if (alreadyOpen) {
+      if ("state" in alreadyOpen && alreadyOpen.state !== "open") {
+        throw new Error("The operation-bound pull request is no longer open");
+      }
       if (!alreadyOpen.draft) {
         if (operation.pull_request_number === alreadyOpen.number) {
           await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
@@ -366,7 +379,8 @@ export default defineTool({
         await assertMatchingCommit(alreadyOpen.head.sha, await liveBaseSha());
         validatedOpen = await revalidateRecoveredPull(alreadyOpen.number, alreadyOpen.head.sha);
       } catch (validationError) {
-        if (validationError instanceof CommitMismatchError && operationOwnsPull(alreadyOpen)) {
+        if ((validationError instanceof CommitMismatchError ||
+          validationError instanceof CreatedPullInvariantError) && operationOwnsPull(alreadyOpen)) {
           await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
         }
         throw validationError;

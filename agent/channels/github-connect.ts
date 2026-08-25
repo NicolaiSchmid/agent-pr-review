@@ -7,10 +7,11 @@ import { z } from "zod";
 const credentials = connectGitHubCredentials(env.githubConnector);
 
 const isAgentBot = (user: { login?: string; type?: string } | undefined) => {
-  if (user?.type !== "Bot" || !user.login) return false;
+  if (!user?.login) return false;
   const login = user.login.toLowerCase();
-  return login === env.githubBotLogin || login === env.agentBotName.toLowerCase() ||
-    login === `${env.agentBotName.toLowerCase()}[bot]`;
+  if (env.githubBotLogin && login === env.githubBotLogin) return true;
+  return user.type === "Bot" && (login === env.agentBotName.toLowerCase() ||
+    login === `${env.agentBotName.toLowerCase()}[bot]`);
 };
 
 const transitionCiTask = async (
