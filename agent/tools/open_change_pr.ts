@@ -203,9 +203,15 @@ export default defineTool({
       }>("GET", `${root}/git/commits/${sha}`);
       const candidateBase = candidate.parents[0]?.sha;
       const expectedTree = candidateBase ? await buildExpectedTree(candidateBase) : null;
+      const ancestry = candidateBase && candidateBase !== baseRef.object.sha
+        ? await request<{ status: string }>(
+            "GET", `${root}/compare/${encodeURIComponent(candidateBase)}...${encodeURIComponent(baseRef.object.sha)}`,
+          )
+        : { status: "identical" };
       if (
         !candidateBase ||
         candidate.parents.length !== 1 ||
+        !["ahead", "identical"].includes(ancestry.status) ||
         candidate.message !== commitMessageFor(candidateBase) ||
         candidate.tree.sha !== expectedTree?.sha
       ) {

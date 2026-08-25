@@ -89,13 +89,42 @@ export default defineTool({
       if (statuses.length < statusTotal) {
         throw new Error(`GitHub status pagination stopped at ${statuses.length} of ${statusTotal}`);
       }
+      const normalizedChecks = (checkRuns as Array<{
+        name?: string; status?: string; conclusion?: string | null;
+      }>).map((check) => ({
+        name: check.name ?? "unnamed check",
+        status: check.status ?? "unknown",
+        conclusion: check.conclusion ?? null,
+      }));
+      const normalizedStatuses = (statuses as Array<{
+        context?: string; state?: string;
+      }>).map((status) => ({
+        name: status.context ?? "unnamed status",
+        state: status.state ?? "unknown",
+      }));
+      const pending = [
+        ...normalizedChecks.filter((check) => check.status !== "completed"),
+        ...normalizedStatuses.filter((status) => status.state === "pending"),
+      ];
+      const failed = [
+        ...normalizedChecks.filter(
+          (check) => check.status === "completed" &&
+            check.conclusion !== null &&
+            !["success", "neutral", "skipped"].includes(check.conclusion),
+        ),
+        ...normalizedStatuses.filter((status) => !["pending", "success"].includes(status.state)),
+      ];
       return {
         operation: input.operation,
         data: {
-          check_runs: checkRuns,
           check_run_total_count: checkRunTotal,
-          statuses,
           status_total_count: statusTotal,
+          terminal: checkRunTotal + statusTotal > 0 && pending.length === 0,
+          pending_count: pending.length,
+          failed_count: failed.length,
+          pending: pending.slice(0, 500),
+          failed: failed.slice(0, 500),
+          details_truncated: pending.length > 500 || failed.length > 500,
         },
       };
     }
