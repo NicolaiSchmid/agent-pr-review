@@ -62,7 +62,10 @@ export default defineTool({
       from conversation
       on conflict (conversation_id, head_sha)
         where kind = 'pr_review' and state not in ('completed', 'superseded', 'failed', 'cancelled')
-      do update set state = 'waiting_for_ci', updated_at = now()
+      do update set updated_at = case
+        when tasks.state = 'waiting_for_ci' then now()
+        else tasks.updated_at
+      end
       returning id
     `;
     return { taskId: rows[0]!.id, state: "waiting_for_ci", headSha };

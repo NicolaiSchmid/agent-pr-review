@@ -38,7 +38,11 @@ export const requireRepositoryPermission = async (
   required: RequiredPermission,
 ) => {
   const auth = ctx.session.auth.current;
-  if (auth?.principalType === "runtime" && auth.authenticator === "app") return;
+  if (auth?.principalType === "runtime" && auth.authenticator === "app") {
+    const target = auth.attributes.repository;
+    if (typeof target === "string" && target.toLowerCase() === `${owner}/${repo}`.toLowerCase()) return;
+    throw new Error("Runtime repository access is outside the claimed task target");
+  }
   const login = await githubLoginFor(ctx);
   if (!login) {
     throw new Error("A verified GitHub identity is required for repository access");

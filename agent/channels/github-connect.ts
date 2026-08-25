@@ -6,11 +6,12 @@ import { z } from "zod";
 
 const credentials = connectGitHubCredentials(env.githubConnector);
 
-const finishCiTask = async (
+const transitionCiTask = async (
   repositoryId: string,
   pullRequestNumber: number,
   headSha: string,
-  state: "completed" | "waiting_for_ci",
+  from: "reviewing" | "publishing",
+  state: "completed" | "publishing" | "waiting_for_ci",
   taskId: string,
   leaseToken: string,
 ) => {
@@ -21,7 +22,7 @@ const finishCiTask = async (
     where t.conversation_id = c.id
       and t.repository_id = ${repositoryId}
       and t.head_sha = ${headSha}
-      and t.state = 'reviewing'
+      and t.state = ${from}
       and t.kind = 'pr_review'
       and c.pull_request_number = ${pullRequestNumber}
       and t.id = ${taskId}::uuid
@@ -29,6 +30,18 @@ const finishCiTask = async (
     returning t.id
   `;
   return rows.length === 1;
+};
+
+const trustedCiClaim = (ctx: { session: { auth: { initiator: { attributes: Readonly<Record<string, string | readonly string[]>> } | null } } }) => {
+  const attributes = ctx.session.auth.initiator?.attributes;
+  const taskId = attributes?.ci_task_id;
+  const leaseToken = attributes?.ci_lease_id;
+  if (
+    typeof taskId !== "string" || typeof leaseToken !== "string" ||
+    !z.string().uuid().safeParse(taskId).success ||
+    !z.string().uuid().safeParse(leaseToken).success
+  ) return null;
+  return { taskId, leaseToken };
 };
 
 const parseCiOutcome = (message: string) => {
@@ -62,23 +75,52 @@ export default githubChannel({
     ],
   },
   events: {
-    async "message.completed"(data, channel) {
+    async "message.completed"(data, channel, ctx) {
       if (data.finishReason === "tool-calls") return;
       const outcome = data.message ? parseCiOutcome(data.message) : null;
-      let publish = true;
-      if (outcome && channel.state.pullRequestNumber && channel.state.headSha) {
-        publish = await finishCiTask(
+      const claim = trustedCiClaim(ctx);
+      if (!claim) {
+        if (!data.message) return;
+        for (let offset = 0; offset < data.message.length; offset += 60_000) {
+          await channel.thread.post(data.message.slice(offset, offset + 60_000));
+        }
+        return;
+      }
+      if (!channel.state.pullRequestNumber || !channel.state.headSha) return;
+      if (
+        !outcome || outcome.taskId !== claim.taskId ||
+        outcome.leaseToken !== claim.leaseToken || !data.message
+      ) {
+        await transitionCiTask(
           String(channel.state.repositoryId),
           channel.state.pullRequestNumber,
           channel.state.headSha,
-          outcome.state === "terminal" ? "completed" : "waiting_for_ci",
-          outcome.taskId,
-          outcome.leaseToken,
+          "reviewing", "waiting_for_ci", claim.taskId, claim.leaseToken,
         );
+        return;
       }
-      if (!data.message || !publish) return;
-      for (let offset = 0; offset < data.message.length; offset += 60_000) {
-        await channel.thread.post(data.message.slice(offset, offset + 60_000));
+      const claimed = await transitionCiTask(
+        String(channel.state.repositoryId), channel.state.pullRequestNumber,
+        channel.state.headSha, "reviewing", "publishing", claim.taskId, claim.leaseToken,
+      );
+      if (!claimed) return;
+      try {
+        for (let offset = 0; offset < data.message.length; offset += 60_000) {
+          await channel.thread.post(data.message.slice(offset, offset + 60_000));
+        }
+        await transitionCiTask(
+          String(channel.state.repositoryId), channel.state.pullRequestNumber,
+          channel.state.headSha, "publishing",
+          outcome.state === "terminal" ? "completed" : "waiting_for_ci",
+          claim.taskId, claim.leaseToken,
+        );
+      } catch (error) {
+        await transitionCiTask(
+          String(channel.state.repositoryId), channel.state.pullRequestNumber,
+          channel.state.headSha, "publishing", "waiting_for_ci",
+          claim.taskId, claim.leaseToken,
+        ).catch(() => undefined);
+        throw error;
       }
     },
     async "session.failed"(data, channel) {
@@ -148,8 +190,17 @@ export default githubChannel({
       returning t.id, t.lease_token
     `;
     if (claimed.length === 0) return null;
+    const auth = defaultGitHubAuth(ctx);
     return {
-      auth: defaultGitHubAuth(ctx),
+      auth: {
+        ...auth,
+        attributes: {
+          ...auth.attributes,
+          ci_task_id: claimed[0]!.id,
+          ci_lease_id: claimed[0]!.lease_token,
+          repository: ctx.repository.fullName,
+        },
+      },
       context: [
         `CI check suite ${suite.checkSuiteId} reached a terminal state for ${suite.headSha}.`,
         `The claimed durable CI task is ${claimed[0]!.id}.`,

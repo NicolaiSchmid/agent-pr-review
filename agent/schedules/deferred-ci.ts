@@ -84,6 +84,10 @@ const reportedTerminalCi = async (
       response += extractCompletedAssistantText(event as Parameters<typeof extractCompletedAssistantText>[0]);
     }
   }
+  const ids = [...response.matchAll(/^CI_TASK_ID:\s*(\S+)\s*$/gim)];
+  const leases = [...response.matchAll(/^CI_LEASE_ID:\s*(\S+)\s*$/gim)];
+  const states = [...response.matchAll(/^CI_TASK_STATE:\s*(pending|terminal)\s*$/gim)];
+  if (ids.length !== 1 || leases.length !== 1 || states.length !== 1) return false;
   return new RegExp(
     `(?:^|\\n)CI_TASK_ID:\\s*${taskId}\\s*\\nCI_LEASE_ID:\\s*${leaseToken}\\s*\\nCI_TASK_STATE:\\s*terminal\\s*$`,
     "i",
@@ -100,7 +104,7 @@ export default defineSchedule({
             select t.id
             from tasks t
             join conversations c on c.id = t.conversation_id
-            where (t.state = 'waiting_for_ci' or (t.state = 'reviewing' and t.updated_at < now() - interval '15 minutes'))
+            where (t.state = 'waiting_for_ci' or (t.state in ('reviewing', 'publishing') and t.updated_at < now() - interval '15 minutes'))
               and t.head_sha is not null
               and c.repository_id is not null
               and c.repository_owner is not null
@@ -114,7 +118,7 @@ export default defineSchedule({
           set state = 'reviewing', lease_token = gen_random_uuid(), updated_at = now()
           from candidates x, conversations c
           where t.id = x.id and t.conversation_id = c.id
-            and (t.state = 'waiting_for_ci' or (t.state = 'reviewing' and t.updated_at < now() - interval '15 minutes'))
+            and (t.state = 'waiting_for_ci' or (t.state in ('reviewing', 'publishing') and t.updated_at < now() - interval '15 minutes'))
           returning t.id, t.head_sha, t.lease_token, c.repository_id,
             c.repository_owner, c.repository_name, c.github_installation_id,
             c.pull_request_number
@@ -149,7 +153,15 @@ export default defineSchedule({
                     ? { installationId: Number(task.github_installation_id) }
                     : {}),
                 },
-                auth: appAuth,
+                auth: {
+                  ...appAuth,
+                  attributes: {
+                    ...appAuth.attributes,
+                    ci_task_id: task.id,
+                    ci_lease_id: task.lease_token,
+                    repository: `${task.repository_owner}/${task.repository_name}`,
+                  },
+                },
               });
               const terminal = await reportedTerminalCi(
                 await session.getEventStream(), task.id, task.lease_token,

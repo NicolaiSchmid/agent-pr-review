@@ -76,6 +76,8 @@ export default defineTool({
       html_url: string;
       head: { sha: string };
       draft: boolean;
+      title: string;
+      body: string | null;
     }>>(
       "GET",
       `${root}/pulls?state=open&head=${encodeURIComponent(`${input.owner}:${input.branch}`)}${baseBranch ? `&base=${encodeURIComponent(baseBranch)}` : ""}`,
@@ -95,14 +97,22 @@ export default defineTool({
           html_url: string;
           head: { sha: string };
           draft: boolean;
+          title: string;
+          body: string | null;
         }>("GET", `${root}/pulls/${pull.number}`);
         if (!created.draft) throw new Error("The created pull request is no longer a draft");
+        if (created.title !== input.title || (created.body ?? "") !== input.body) {
+          throw new Error("The created pull request metadata no longer matches the approved request");
+        }
         await assertMatchingCommit(created.head.sha);
         return { ...created, commitSha: created.head.sha };
       } catch (error) {
         const recovered = await existingPull(baseBranch);
         if (recovered) {
           if (!recovered.draft) throw new Error("Refusing to recover a pull request that is no longer a draft");
+          if (recovered.title !== input.title || (recovered.body ?? "") !== input.body) {
+            throw new Error("Refusing to recover a pull request with different title or body");
+          }
           await assertMatchingCommit(recovered.head.sha);
           return {
             number: recovered.number,
@@ -209,6 +219,9 @@ export default defineTool({
     const alreadyOpen = await existingPull(baseBranch);
     if (alreadyOpen) {
       if (!alreadyOpen.draft) throw new Error("Refusing to recover a pull request that is no longer a draft");
+      if (alreadyOpen.title !== input.title || (alreadyOpen.body ?? "") !== input.body) {
+        throw new Error("Refusing to recover a pull request with different title or body");
+      }
       await assertMatchingCommit(alreadyOpen.head.sha);
       return {
         owner: input.owner,
