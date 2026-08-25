@@ -6,6 +6,13 @@ import { z } from "zod";
 
 const credentials = connectGitHubCredentials(env.githubConnector);
 
+const isAgentBot = (user: { login?: string; type?: string } | undefined) => {
+  if (user?.type !== "Bot" || !user.login) return false;
+  const login = user.login.toLowerCase();
+  return login === env.githubBotLogin || login === env.agentBotName.toLowerCase() ||
+    login === `${env.agentBotName.toLowerCase()}[bot]`;
+};
+
 const transitionCiTask = async (
   repositoryId: string,
   pullRequestNumber: number,
@@ -159,11 +166,15 @@ export default githubChannel({
         }
         let existingCommentId: number | undefined;
         for (let page = 1; !existingCommentId; page += 1) {
-          const comments = await channel.github.request<Array<{ id: number; body?: string }>>({
+          const comments = await channel.github.request<Array<{
+            id: number; body?: string; user?: { login?: string; type?: string };
+          }>>({
             method: "GET",
             path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/${channel.state.issueNumber}/comments?per_page=100&page=${page}`,
           });
-          existingCommentId = comments.body.find((comment) => comment.body?.includes(marker))?.id;
+          existingCommentId = comments.body.find(
+            (comment) => isAgentBot(comment.user) && comment.body?.includes(marker),
+          )?.id;
           if (comments.body.length < 100) break;
         }
         if (existingCommentId) {
@@ -190,8 +201,7 @@ export default githubChannel({
         );
         return;
       }
-      const terminal = await hostCiTerminal(channel, channel.state.headSha);
-      if (!terminal) {
+      if (outcome.state !== "terminal" || !await hostCiTerminal(channel, channel.state.headSha)) {
         await transitionCiTask(
           String(channel.state.repositoryId), channel.state.pullRequestNumber,
           channel.state.headSha, "reviewing", "waiting_for_ci",
@@ -212,11 +222,15 @@ export default githubChannel({
         const body = `${data.message.slice(0, 60_000 - suffix.length)}${suffix}`;
         let existingCommentId: number | undefined;
         for (let page = 1; !existingCommentId; page += 1) {
-          const comments = await channel.github.request<Array<{ id: number; body?: string }>>({
+          const comments = await channel.github.request<Array<{
+            id: number; body?: string; user?: { login?: string; type?: string };
+          }>>({
             method: "GET",
             path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/${channel.state.pullRequestNumber}/comments?per_page=100&page=${page}`,
           });
-          existingCommentId = comments.body.find((comment) => comment.body?.includes(marker))?.id;
+          existingCommentId = comments.body.find(
+            (comment) => isAgentBot(comment.user) && comment.body?.includes(marker),
+          )?.id;
           if (comments.body.length < 100) break;
         }
         if (!await canPublishCiTask(channel, claim.taskId, claim.leaseToken)) return;

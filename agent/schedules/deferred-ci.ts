@@ -2,7 +2,6 @@ import { defineSchedule } from "eve/schedules";
 import { connectGitHubCredentials } from "@vercel/connect/eve";
 import github from "../channels/github-connect.js";
 import { database } from "../lib/database.js";
-import { extractCompletedAssistantText } from "../lib/message-text.js";
 import { env } from "../lib/env.js";
 
 const credentials = connectGitHubCredentials(env.githubConnector);
@@ -24,14 +23,6 @@ const release = async (taskId: string, leaseToken: string) => {
   await database()`
     update tasks
     set state = 'waiting_for_ci', updated_at = now()
-    where id = ${taskId} and state = 'reviewing' and lease_token = ${leaseToken}::uuid
-  `;
-};
-
-const complete = async (taskId: string, leaseToken: string) => {
-  await database()`
-    update tasks
-    set state = 'completed', updated_at = now()
     where id = ${taskId} and state = 'reviewing' and lease_token = ${leaseToken}::uuid
   `;
 };
@@ -86,8 +77,16 @@ const cleanupStaleResult = async (
       { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
     );
     if (!response.ok) throw new Error(`Could not find stale CI result: ${response.status}`);
-    const comments = await response.json() as Array<{ id: number; body?: string }>;
-    const existing = comments.find((comment) => comment.body?.includes(marker));
+    const comments = await response.json() as Array<{
+      id: number; body?: string; user?: { login?: string; type?: string };
+    }>;
+    const existing = comments.find((comment) => {
+      const login = comment.user?.login?.toLowerCase();
+      const owned = comment.user?.type === "Bot" && !!login &&
+        (login === env.githubBotLogin || login === env.agentBotName.toLowerCase() ||
+          login === `${env.agentBotName.toLowerCase()}[bot]`);
+      return owned && comment.body?.includes(marker);
+    });
     if (existing) {
       const update = await fetch(
         `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/issues/comments/${existing.id}`,
@@ -123,33 +122,12 @@ const currentPullRequestHead = async (
   return { headSha: pull.head.sha.toLowerCase(), open: pull.state === "open" && !pull.merged };
 };
 
-const reportedTerminalCi = async (
-  stream: ReadableStream<unknown>,
-  taskId: string,
-  leaseToken: string,
-): Promise<boolean> => {
-  let response = "";
+const drainSession = async (stream: ReadableStream<unknown>): Promise<void> => {
   const reader = stream.getReader();
   for (;;) {
-    const { done, value: event } = await reader.read();
+    const { done } = await reader.read();
     if (done) break;
-    if (
-      typeof event === "object" &&
-      event !== null &&
-      "type" in event &&
-      event.type === "message.completed"
-    ) {
-      response += extractCompletedAssistantText(event as Parameters<typeof extractCompletedAssistantText>[0]);
-    }
   }
-  const ids = [...response.matchAll(/^CI_TASK_ID:\s*(\S+)\s*$/gim)];
-  const leases = [...response.matchAll(/^CI_LEASE_ID:\s*(\S+)\s*$/gim)];
-  const states = [...response.matchAll(/^CI_TASK_STATE:\s*(pending|terminal)\s*$/gim)];
-  if (ids.length !== 1 || leases.length !== 1 || states.length !== 1) return false;
-  return new RegExp(
-    `(?:^|\\n)CI_TASK_ID:\\s*${taskId}\\s*\\nCI_LEASE_ID:\\s*${leaseToken}\\s*\\nCI_TASK_STATE:\\s*terminal\\s*$`,
-    "i",
-  ).test(response.trim());
 };
 
 export default defineSchedule({
@@ -223,11 +201,8 @@ export default defineSchedule({
                   },
                 },
               });
-              const terminal = await reportedTerminalCi(
-                await session.getEventStream(), task.id, task.lease_token,
-              );
-              if (terminal) await complete(task.id, task.lease_token);
-              else await release(task.id, task.lease_token);
+              await drainSession(await session.getEventStream());
+              await release(task.id, task.lease_token);
             } catch (error) {
               if (error instanceof PermanentTargetError) {
                 await cancel(task.id, task.lease_token).catch(() => undefined);
