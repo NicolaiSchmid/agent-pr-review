@@ -61,9 +61,11 @@ const resolveRepository = async (task: DeferredCiTask) => {
   const response = await fetch(`https://api.github.com/repositories/${task.repository_id}`, {
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" },
   });
+  const rateBody = response.status === 403 ? await response.clone().text() : "";
   const rateLimited = response.status === 429 || response.headers.get("retry-after") !== null ||
     response.headers.get("x-ratelimit-remaining") === "0";
-  if ((response.status === 403 && !rateLimited) || response.status === 404) {
+  const secondaryLimited = response.status === 403 && /rate limit|abuse detection|temporarily blocked/i.test(rateBody);
+  if ((response.status === 403 && !rateLimited && !secondaryLimited) || response.status === 404) {
     throw new PermanentTargetError(`Repository is permanently unavailable: ${response.status}`);
   }
   if (!response.ok) throw new Error(`Could not resolve repository identity: ${response.status}`);

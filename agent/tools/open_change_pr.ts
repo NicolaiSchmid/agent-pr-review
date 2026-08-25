@@ -50,6 +50,13 @@ export default defineTool({
     if (input.files.some((file) => file.path.startsWith("/") || file.path.split("/").includes(".."))) {
       throw new Error("File paths must stay within the repository");
     }
+    if (input.files.some((file) =>
+      file.path.split("/").some((component) =>
+        component === "" || component === "." || /[\u0000-\u001f\u007f]/.test(component),
+      ),
+    )) {
+      throw new Error("File paths must contain only non-empty Git tree components");
+    }
 
     const { token } = await ctx.getToken(githubAuth);
     await requireRepositoryPermission(ctx, token, input.owner, input.repo, "write");
@@ -59,6 +66,7 @@ export default defineTool({
         super(message);
       }
     }
+    class CommitMismatchError extends Error {}
     const request = async <T = Record<string, unknown>>(method: string, path: string, body?: unknown) => {
       const response = await fetch(`https://api.github.com${path}`, {
         method,
@@ -140,7 +148,9 @@ export default defineTool({
           try {
             await assertMatchingCommit(recovered.head.sha);
           } catch (validationError) {
-            await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
+            if (validationError instanceof CommitMismatchError) {
+              await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
+            }
             throw validationError;
           }
           return {
@@ -244,7 +254,7 @@ export default defineTool({
         candidate.message !== commitMessageFor(candidateBase) ||
         candidate.tree.sha !== expectedTree?.sha
       ) {
-        throw new Error(
+        throw new CommitMismatchError(
           `Branch ${input.branch} already exists but does not match this approved change`,
         );
       }
@@ -258,7 +268,9 @@ export default defineTool({
       try {
         await assertMatchingCommit(alreadyOpen.head.sha);
       } catch (validationError) {
-        await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
+        if (validationError instanceof CommitMismatchError) {
+          await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
+        }
         throw validationError;
       }
       return {

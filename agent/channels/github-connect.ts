@@ -75,6 +75,43 @@ const canPublishCiTask = async (
     pull.body.head.sha.toLowerCase() === channel.state.headSha.toLowerCase();
 };
 
+const hostCiTerminal = async (
+  channel: {
+    github: { request<T>(input: { method: "GET"; path: string }): Promise<{ body: T }> };
+    repository: { owner: string; name: string };
+  },
+  headSha: string,
+) => {
+  const root = `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}`;
+  const checks: Array<{ status: string; conclusion: string | null }> = [];
+  let checkTotal = 0;
+  for (let page = 1; page <= 30; page += 1) {
+    const response = await channel.github.request<{
+      total_count: number;
+      check_runs: Array<{ status: string; conclusion: string | null }>;
+    }>({ method: "GET", path: `${root}/commits/${headSha}/check-runs?per_page=100&page=${page}` });
+    checkTotal = response.body.total_count;
+    checks.push(...response.body.check_runs);
+    if (checks.length >= checkTotal || response.body.check_runs.length < 100) break;
+  }
+  if (checks.length < checkTotal) throw new Error("Check Run verification exceeded pagination bound");
+  const statuses: Array<{ state: string }> = [];
+  let statusTotal = 0;
+  for (let page = 1; page <= 30; page += 1) {
+    const response = await channel.github.request<{
+      total_count: number;
+      statuses: Array<{ state: string }>;
+    }>({ method: "GET", path: `${root}/commits/${headSha}/status?per_page=100&page=${page}` });
+    statusTotal = response.body.total_count;
+    statuses.push(...response.body.statuses);
+    if (statuses.length >= statusTotal || response.body.statuses.length < 100) break;
+  }
+  if (statuses.length < statusTotal) throw new Error("Commit status verification exceeded pagination bound");
+  return checkTotal + statusTotal > 0 &&
+    checks.every((check) => check.status === "completed" && check.conclusion !== null) &&
+    statuses.every((status) => status.state !== "pending");
+};
+
 const parseCiOutcome = (message: string) => {
   const ids = [...message.matchAll(/^CI_TASK_ID:\s*(\S+)\s*$/gim)];
   const leases = [...message.matchAll(/^CI_LEASE_ID:\s*(\S+)\s*$/gim)];
@@ -153,7 +190,8 @@ export default githubChannel({
         );
         return;
       }
-      if (outcome.state === "pending") {
+      const terminal = await hostCiTerminal(channel, channel.state.headSha);
+      if (!terminal) {
         await transitionCiTask(
           String(channel.state.repositoryId), channel.state.pullRequestNumber,
           channel.state.headSha, "reviewing", "waiting_for_ci",
