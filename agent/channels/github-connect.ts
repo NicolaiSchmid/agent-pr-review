@@ -44,6 +44,37 @@ const trustedCiClaim = (ctx: { session: { auth: { initiator: { attributes: Reado
   return { taskId, leaseToken };
 };
 
+const canPublishCiTask = async (
+  channel: {
+    github: { request<T>(input: { method: "GET"; path: string }): Promise<{ body: T }> };
+    repository: { owner: string; name: string };
+    state: { headSha: string | null; pullRequestNumber: number | null; repositoryId: number };
+  },
+  taskId: string,
+  leaseToken: string,
+) => {
+  if (!channel.state.pullRequestNumber || !channel.state.headSha) return false;
+  const rows = await database()<Array<{ id: string }>>`
+    select t.id from tasks t
+    join conversations c on c.id = t.conversation_id
+    where t.id = ${taskId}::uuid and t.lease_token = ${leaseToken}::uuid
+      and t.state = 'publishing' and t.repository_id = ${String(channel.state.repositoryId)}
+      and t.head_sha = ${channel.state.headSha}
+      and c.pull_request_number = ${channel.state.pullRequestNumber}
+  `;
+  if (rows.length !== 1) return false;
+  const pull = await channel.github.request<{
+    head: { sha: string };
+    merged: boolean;
+    state: string;
+  }>({
+    method: "GET",
+    path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/pulls/${channel.state.pullRequestNumber}`,
+  });
+  return pull.body.state === "open" && !pull.body.merged &&
+    pull.body.head.sha.toLowerCase() === channel.state.headSha.toLowerCase();
+};
+
 const parseCiOutcome = (message: string) => {
   const ids = [...message.matchAll(/^CI_TASK_ID:\s*(\S+)\s*$/gim)];
   const leases = [...message.matchAll(/^CI_LEASE_ID:\s*(\S+)\s*$/gim)];
@@ -99,6 +130,14 @@ export default githubChannel({
         );
         return;
       }
+      if (outcome.state === "pending") {
+        await transitionCiTask(
+          String(channel.state.repositoryId), channel.state.pullRequestNumber,
+          channel.state.headSha, "reviewing", "waiting_for_ci",
+          claim.taskId, claim.leaseToken,
+        );
+        return;
+      }
       const claimed = await transitionCiTask(
         String(channel.state.repositoryId), channel.state.pullRequestNumber,
         channel.state.headSha, "reviewing", "publishing", claim.taskId, claim.leaseToken,
@@ -106,12 +145,13 @@ export default githubChannel({
       if (!claimed) return;
       try {
         for (let offset = 0; offset < data.message.length; offset += 60_000) {
+          if (!await canPublishCiTask(channel, claim.taskId, claim.leaseToken)) return;
           await channel.thread.post(data.message.slice(offset, offset + 60_000));
         }
         await transitionCiTask(
           String(channel.state.repositoryId), channel.state.pullRequestNumber,
           channel.state.headSha, "publishing",
-          outcome.state === "terminal" ? "completed" : "waiting_for_ci",
+          "completed",
           claim.taskId, claim.leaseToken,
         );
       } catch (error) {
@@ -121,24 +161,6 @@ export default githubChannel({
           claim.taskId, claim.leaseToken,
         ).catch(() => undefined);
         throw error;
-      }
-    },
-    async "session.failed"(data, channel) {
-      if (!channel.state.pullRequestNumber || !channel.state.headSha) return;
-      const released = await database()<Array<{ id: string }>>`
-        update tasks t
-        set state = 'waiting_for_ci', updated_at = now()
-        from conversations c
-        where t.conversation_id = c.id
-          and t.repository_id = ${String(channel.state.repositoryId)}
-          and t.head_sha = ${channel.state.headSha}
-          and t.kind = 'pr_review'
-          and t.state in ('reviewing', 'publishing')
-          and c.pull_request_number = ${channel.state.pullRequestNumber}
-        returning t.id
-      `;
-      if (released.length === 0) {
-        await channel.thread.post(`This session failed and can be retried. Error: ${data.code}`);
       }
     },
   },

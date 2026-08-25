@@ -214,6 +214,7 @@ export default defineTool({
       const expectedTree = candidateBase ? await buildExpectedTree(candidateBase) : null;
       if (
         !candidateBase ||
+        candidate.parents.length !== 1 ||
         candidate.message !== commitMessageFor(candidateBase) ||
         candidate.tree.sha !== expectedTree?.sha
       ) {
