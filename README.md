@@ -1,6 +1,17 @@
 # agent-pr-review
 
-A compact, repository-locked Eve agent that reviews pull requests for `NicolaiSchmid/nunc-immo`. It uses direct Anthropic BYOK (`claude-fable-5` by default), durable Eve sessions, Vercel Sandbox, one update-in-place progress comment, and evidence-gated inline findings.
+A steerable Eve engineering agent with an evidence-gated pull-request reviewer at its core. It uses direct Anthropic BYOK (`claude-fable-5` by default), durable Eve sessions, Vercel Sandbox, Vercel Connect-backed GitHub and Slack channels, CI lifecycle primitives, scoped long-term-memory contracts, and approval-gated draft PR creation.
+
+## Capability Status
+
+- Automated repository-locked review and safe inline publication: implemented.
+- GitHub `@mention` conversations through Vercel Connect: implemented; connector provisioning required.
+- Slack mentions, DMs, threaded continuation, and interactive approvals through Vercel Connect: implemented for conversation and user-scoped memory. Repository tools require a deployment-provisioned verified Slack-to-GitHub identity link containing the stable GitHub user ID and current account login (`principal_identities.provider_user_id` and `provider_login`); an in-agent linking flow is not yet implemented.
+- CI terminal-event continuation and task-state primitives: implemented. Full required-check discovery, settling windows, durable deadlines, and automatic deferral of the legacy webhook are the next orchestration increment.
+- User, repository, and PR memory schemas, Convex persistence, retrieval, confirmed writes, provenance, and author-controlled forgetting: implemented. Convex also owns durable CI leases and idempotent change operations, and its reactive data model is ready for a future UI. Organization memory remains schema-only until verified organization membership and Slack-to-GitHub identity linking are wired; Slack receives only its user-scoped memory.
+- Generic approval-gated draft PR creation for any connector-authorized repository, including this repository: implemented for complete file replacements. Sandbox-generated patch capture and automatic test-evidence attachment remain to be wired.
+
+Fable 5 is used at standard inference speed. Anthropic's literal `speed: "fast"` mode does not currently support Fable 5; do not enable that provider option until Anthropic adds support.
 
 ## Architecture
 
@@ -32,8 +43,34 @@ No runtime secret is needed to install, typecheck, test, or build. Runtime requi
 - `GITHUB_WEBHOOK_SECRET`: high-entropy webhook secret.
 - `GITHUB_TOKEN`: host-only GitHub credential used to read PR data and write comments/reviews.
 - `GITHUB_SANDBOX_TOKEN`: optional separate read-only credential retained by the host and brokered by the sandbox firewall only into HTTPS requests to `github.com`.
+- `GITHUB_CONNECTOR`: Vercel Connect GitHub connector UID, default `github/eve`.
+- `SLACK_CONNECTOR`: Vercel Connect Slack connector UID, default `slack/eve`.
+- `AGENT_BOT_NAME`: GitHub mention name created by the connector, default `eve`.
+- `GITHUB_BOT_LOGIN`: exact GitHub login used by the connector. This is required for PAT-backed connectors, whose comments GitHub reports as user-authored, so retries and self-comment suppression can identify them safely.
+- `CONVEX_URL`: URL of the Convex deployment used for long-term memory and durable orchestration state.
+- `CONVEX_AGENT_SECRET`: high-entropy shared secret configured in both the agent runtime and the Convex deployment. It protects agent-only queries and mutations; do not expose it to a browser.
 
 If `GITHUB_SANDBOX_TOKEN` is absent, scoped host tools provide the tree and file contents safely. That supports static review but not arbitrary Git commands or test execution. Set it for the intended full workflow.
+
+Provision and attach the Connect triggers to the native Eve channel routes:
+
+```bash
+vercel connect create github --name eve --triggers
+vercel connect attach github/eve --triggers --trigger-path /eve/v1/github
+vercel connect create slack --name eve --triggers
+vercel connect attach slack/eve --triggers --trigger-path /eve/v1/slack
+```
+
+The existing signed `/webhook` endpoint remains available during migration for automatic PR review. Connect-backed mentions use `/eve/v1/github`; Slack uses `/eve/v1/slack`.
+
+Create or select a Convex project, configure the agent-only secret in the Convex deployment, and run the backend during development:
+
+```bash
+pnpm convex:dev
+npx convex env set CONVEX_AGENT_SECRET "$CONVEX_AGENT_SECRET"
+```
+
+`convex/schema.ts` defines the durable data model and indexes. `convex/store.ts` contains transactional agent operations. A future UI should add authenticated, least-privilege query functions rather than receive `CONVEX_AGENT_SECRET`.
 
 ## GitHub Configuration
 
@@ -43,6 +80,9 @@ For v1, a fine-grained PAT is sufficient. Restrict it to `NicolaiSchmid/nunc-imm
 - Pull requests: read and write
 - Issues: read and write
 - Metadata: read
+- Administration: read (used only to verify the authenticated caller's repository role before repository tools run)
+- Checks: read
+- Commit statuses: read
 
 The sandbox token should be a different fine-grained token restricted to the same repository with only Contents: read. Never reuse the host token there. Neither GitHub token is included in sandbox environment options: Eve's network policy injects the read-only authorization header at the firewall, and the host mutation token is never brokered.
 
@@ -54,13 +94,14 @@ Configure a GitHub webhook:
 - Event: Pull requests
 - Actions handled: opened, synchronize, reopened, ready for review
 
-A GitHub App is the production recommendation because installation-scoped, short-lived tokens reduce PAT blast radius. Give the App the same repository permissions and subscribe only to pull request events. The current typed client is intentionally token-based v1; swapping token acquisition does not change scope or publication logic.
+A GitHub App is the production recommendation because installation-scoped, short-lived tokens reduce PAT blast radius. Give the App the same repository permissions, including Administration: read for caller authorization plus Checks and Commit statuses: read for CI verification. Subscribe to pull request and check suite events so terminal CI can resume deferred work immediately; the five-minute schedule remains the durable fallback. The current typed client is intentionally token-based v1; swapping token acquisition does not change scope or publication logic.
 
 ## Deploy
 
 Deploy as a normal Eve application on Vercel and set the runtime environment variables there. Eve selects Vercel Sandbox in deployment. Its egress policy permits only GitHub/GitHubusercontent plus npm and pnpm registry hosts required to install and test `nunc-immo`; local Docker fallback is deny-all.
 
 ```bash
+pnpm convex:deploy
 pnpm verify
 pnpm build
 ```
@@ -83,7 +124,7 @@ Set `ALLOW_FORK_EXECUTION=true` only after explicitly accepting that untrusted f
 - GitHub API pagination has a hard safety bound and errors include status/context but never credentials.
 - Prompt injection in repository content is explicitly treated as untrusted data.
 
-Residual v1 limitations: GitHub may omit `patch` for very large/binary files, so inline findings on those files are conservatively dropped; PRs with more than 3,000 changed files cannot be reviewed through this API and fail clearly; no external database or queue is used beyond Eve durability and GitHub state; a GitHub App token provider is not yet implemented; and fork execution is a coarse deployment-wide opt-in. GitHub serializes pending reviews per user, which makes publication idempotent. Submission and a concurrent push remain separate external mutations, but the post-submit check now compensates that race by withdrawing the submitted review’s actionable content. During the brief interval before compensation completes, GitHub may momentarily display stale comments; retries resume cleanup until none remain.
+Residual v1 limitations: GitHub may omit `patch` for very large/binary files, so inline findings on those files are conservatively dropped; PRs with more than 3,000 changed files cannot be reviewed through this API and fail clearly; a GitHub App token provider is not yet implemented; and fork execution is a coarse deployment-wide opt-in. GitHub serializes pending reviews per user, which makes publication idempotent. Submission and a concurrent push remain separate external mutations, but the post-submit check now compensates that race by withdrawing the submitted review’s actionable content. During the brief interval before compensation completes, GitHub may momentarily display stale comments; retries resume cleanup until none remain.
 
 ## Why This Design
 

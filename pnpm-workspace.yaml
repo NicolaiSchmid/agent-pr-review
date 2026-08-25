@@ -1,5 +1,8 @@
 packages:
   - .
 
+allowBuilds:
+  esbuild: true
+
 overrides:
   "@ai-sdk/provider-utils": 5.0.25

@@ -11,13 +11,17 @@
     "dev": "eve dev",
     "info": "eve info",
     "start": "eve start",
+    "convex:dev": "convex dev",
+    "convex:deploy": "convex deploy",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "verify": "pnpm typecheck && pnpm test && pnpm build"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.36",
+    "@vercel/connect": "^1.0.0",
     "ai": "7.0.58",
+    "convex": "^1.27.0",
     "eve": "0.22.0",
     "zod": "^4.1.13"
   },
