@@ -28,7 +28,11 @@ const githubLoginFor = async (ctx: SessionContext): Promise<string | null> => {
     order by verified_at desc
     limit 1
   `;
-  return identities[0]?.provider_login ?? identities[0]?.provider_user_id ?? null;
+  const identity = identities[0];
+  if (!identity) return null;
+  return /^\d+$/.test(identity.provider_user_id)
+    ? identity.provider_user_id
+    : identity.provider_login ?? identity.provider_user_id;
 };
 
 export const requireRepositoryPermission = async (

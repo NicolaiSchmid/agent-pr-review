@@ -418,31 +418,36 @@ export default githubChannel({
   },
   onCheckSuite: async (ctx, suite) => {
     if ((suite.action === "requested" || suite.action === "rerequested") && suite.headSha) {
-      const affected = await database()<Array<{
-        id: string; pull_request_number: number; state: "completed" | "reviewing" | "publishing";
+      await database()`
+        update tasks set state = 'waiting_for_ci', lease_token = null, updated_at = now()
+        where repository_id = ${String(ctx.repository.id)}
+          and head_sha = ${suite.headSha.toLowerCase()}
+          and kind = 'pr_review' and state in ('reviewing', 'publishing')
+      `;
+      const completed = await database()<Array<{
+        id: string; pull_request_number: number; has_active: boolean;
       }>>`
-        select t.id, c.pull_request_number, t.state
+        select t.id, c.pull_request_number, exists (
+          select 1 from tasks active
+          where active.id <> t.id and active.conversation_id = t.conversation_id
+            and active.head_sha = t.head_sha and active.kind = 'pr_review'
+            and active.state not in ('completed', 'superseded', 'failed', 'cancelled')
+        ) as has_active
         from tasks t join conversations c on c.id = t.conversation_id
         where t.repository_id = ${String(ctx.repository.id)}
           and t.head_sha = ${suite.headSha.toLowerCase()}
-          and t.kind = 'pr_review' and t.state in ('completed', 'reviewing', 'publishing')
+          and t.kind = 'pr_review' and t.state = 'completed'
           and c.pull_request_number is not null
       `;
-      for (const task of affected) {
-        const reopened = await database()<Array<{ state: string }>>`
-          update tasks t set
-            state = case when t.state = 'completed' and exists (
-              select 1 from tasks active
-              where active.id <> t.id and active.conversation_id = t.conversation_id
-                and active.head_sha = t.head_sha and active.kind = 'pr_review'
-                and active.state not in ('completed', 'superseded', 'failed', 'cancelled')
-            ) then 'superseded' else 'waiting_for_ci' end,
-            lease_token = null, updated_at = now()
-          where t.id = ${task.id}::uuid
-            and t.state in ('completed', 'reviewing', 'publishing')
-          returning t.state
-        `;
-        if (reopened.length !== 1) continue;
+      for (const task of completed) {
+        if (!task.has_active) {
+          const reopened = await database()<Array<{ id: string }>>`
+            update tasks set state = 'waiting_for_ci', lease_token = null, updated_at = now()
+            where id = ${task.id}::uuid and state = 'completed'
+            returning id
+          `;
+          if (reopened.length !== 1) continue;
+        }
         const marker = `<!-- eve-ci-result:${task.id} -->`;
         let commentId: number | undefined;
         for (let page = 1; !commentId; page += 1) {
@@ -461,10 +466,16 @@ export default githubChannel({
           await ctx.github.request({
             method: "PATCH",
             path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/issues/comments/${commentId}`,
-            body: { body: `${reopened[0]!.state === "superseded"
+            body: { body: `${task.has_active
               ? "CI result superseded by another active task for this commit."
               : "CI was rerun for this commit; the result is pending revalidation."}\n\n${marker}` },
           });
+        }
+        if (task.has_active) {
+          await database()`
+            update tasks set state = 'superseded', lease_token = null, updated_at = now()
+            where id = ${task.id}::uuid and state = 'completed'
+          `;
         }
       }
       return null;
