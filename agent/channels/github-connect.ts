@@ -14,7 +14,7 @@ const finishCiTask = async (
   taskId: string,
   leaseToken: string,
 ) => {
-  await database()`
+  const rows = await database()<Array<{ id: string }>>`
     update tasks t
     set state = ${state}, updated_at = now()
     from conversations c
@@ -26,7 +26,9 @@ const finishCiTask = async (
       and c.pull_request_number = ${pullRequestNumber}
       and t.id = ${taskId}::uuid
       and t.lease_token = ${leaseToken}::uuid
+    returning t.id
   `;
+  return rows.length === 1;
 };
 
 const parseCiOutcome = (message: string) => {
@@ -63,8 +65,9 @@ export default githubChannel({
     async "message.completed"(data, channel) {
       if (data.finishReason === "tool-calls") return;
       const outcome = data.message ? parseCiOutcome(data.message) : null;
+      let publish = true;
       if (outcome && channel.state.pullRequestNumber && channel.state.headSha) {
-        await finishCiTask(
+        publish = await finishCiTask(
           String(channel.state.repositoryId),
           channel.state.pullRequestNumber,
           channel.state.headSha,
@@ -73,7 +76,7 @@ export default githubChannel({
           outcome.leaseToken,
         );
       }
-      if (!data.message) return;
+      if (!data.message || !publish) return;
       for (let offset = 0; offset < data.message.length; offset += 60_000) {
         await channel.thread.post(data.message.slice(offset, offset + 60_000));
       }

@@ -21,6 +21,9 @@ export default defineTool({
     if (ctx.session.auth.current?.authenticator !== "github-webhook") {
       throw new Error("CI deferral currently requires a GitHub PR conversation; Slack deferral is not yet supported");
     }
+    if (ctx.session.auth.current.attributes.conversation_kind !== "pull_request") {
+      throw new Error("CI deferral must be requested from the PR timeline; proactive inline review-thread continuation is not supported");
+    }
     const { token } = await ctx.getToken(githubAuth);
     await requireRepositoryPermission(ctx, token, input.owner, input.repo, "read");
     const response = await fetch(

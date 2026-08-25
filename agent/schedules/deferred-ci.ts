@@ -41,6 +41,13 @@ const supersede = async (taskId: string, leaseToken: string) => {
   `;
 };
 
+const cancel = async (taskId: string, leaseToken: string) => {
+  await database()`
+    update tasks set state = 'cancelled', updated_at = now()
+    where id = ${taskId} and state = 'reviewing' and lease_token = ${leaseToken}::uuid
+  `;
+};
+
 const currentPullRequestHead = async (task: DeferredCiTask) => {
   const source = credentials.installationToken;
   if (!source) throw new Error("GitHub installation token is unavailable");
@@ -50,7 +57,12 @@ const currentPullRequestHead = async (task: DeferredCiTask) => {
     { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
   );
   if (!response.ok) throw new Error(`Could not revalidate PR head: ${response.status}`);
-  return (await response.json() as { head: { sha: string } }).head.sha.toLowerCase();
+  const pull = await response.json() as {
+    head: { sha: string };
+    merged: boolean;
+    state: string;
+  };
+  return { headSha: pull.head.sha.toLowerCase(), open: pull.state === "open" && !pull.merged };
 };
 
 const reportedTerminalCi = async (
@@ -111,7 +123,12 @@ export default defineSchedule({
         await Promise.allSettled(
           tasks.map(async (task) => {
             try {
-              if (await currentPullRequestHead(task) !== task.head_sha.toLowerCase()) {
+              const pull = await currentPullRequestHead(task);
+              if (!pull.open) {
+                await cancel(task.id, task.lease_token);
+                return;
+              }
+              if (pull.headSha !== task.head_sha.toLowerCase()) {
                 await supersede(task.id, task.lease_token);
                 return;
               }
