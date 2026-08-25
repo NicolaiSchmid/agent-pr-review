@@ -38,10 +38,13 @@ create table if not exists tasks (
   requested_by text references principals(id),
   repository_id text,
   head_sha text,
+  lease_token uuid,
   deadline_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table tasks add column if not exists lease_token uuid;
 
 create unique index if not exists tasks_active_review_head
   on tasks(conversation_id, head_sha)

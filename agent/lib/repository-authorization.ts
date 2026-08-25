@@ -4,8 +4,8 @@ import { database } from "./database.js";
 type RequiredPermission = "read" | "write";
 
 const allowed = {
-  read: new Set(["pull", "triage", "push", "maintain", "admin"]),
-  write: new Set(["push", "maintain", "admin"]),
+  read: new Set(["read", "triage", "write", "maintain", "admin", "pull", "push"]),
+  write: new Set(["write", "maintain", "admin", "push"]),
 } satisfies Record<RequiredPermission, Set<string>>;
 
 const githubLoginFor = async (ctx: SessionContext): Promise<string | null> => {
@@ -57,8 +57,8 @@ export const requireRepositoryPermission = async (
   if (!response.ok) {
     throw new Error(`Could not verify ${required} permission for ${login} on ${owner}/${repo}`);
   }
-  const result = await response.json() as { permission?: string };
-  if (!result.permission || !allowed[required].has(result.permission)) {
+  const result = await response.json() as { permission?: string; role_name?: string };
+  if (![result.permission, result.role_name].some((value) => value && allowed[required].has(value))) {
     throw new Error(`${login} does not have ${required} permission on ${owner}/${repo}`);
   }
 };

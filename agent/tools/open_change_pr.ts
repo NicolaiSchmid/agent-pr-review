@@ -96,11 +96,13 @@ export default defineTool({
           head: { sha: string };
           draft: boolean;
         }>("GET", `${root}/pulls/${pull.number}`);
+        if (!created.draft) throw new Error("The created pull request is no longer a draft");
         await assertMatchingCommit(created.head.sha);
         return { ...created, commitSha: created.head.sha };
       } catch (error) {
         const recovered = await existingPull(baseBranch);
         if (recovered) {
+          if (!recovered.draft) throw new Error("Refusing to recover a pull request that is no longer a draft");
           await assertMatchingCommit(recovered.head.sha);
           return {
             number: recovered.number,
@@ -206,6 +208,7 @@ export default defineTool({
     };
     const alreadyOpen = await existingPull(baseBranch);
     if (alreadyOpen) {
+      if (!alreadyOpen.draft) throw new Error("Refusing to recover a pull request that is no longer a draft");
       await assertMatchingCommit(alreadyOpen.head.sha);
       return {
         owner: input.owner,

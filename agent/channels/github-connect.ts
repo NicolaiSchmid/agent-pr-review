@@ -12,6 +12,7 @@ const finishCiTask = async (
   headSha: string,
   state: "completed" | "waiting_for_ci",
   taskId: string,
+  leaseToken: string,
 ) => {
   await database()`
     update tasks t
@@ -24,17 +25,27 @@ const finishCiTask = async (
       and t.kind = 'pr_review'
       and c.pull_request_number = ${pullRequestNumber}
       and t.id = ${taskId}::uuid
+      and t.lease_token = ${leaseToken}::uuid
   `;
 };
 
 const parseCiOutcome = (message: string) => {
   const ids = [...message.matchAll(/^CI_TASK_ID:\s*(\S+)\s*$/gim)];
+  const leases = [...message.matchAll(/^CI_LEASE_ID:\s*(\S+)\s*$/gim)];
   const states = [...message.matchAll(/^CI_TASK_STATE:\s*(pending|terminal)\s*$/gim)];
-  if (ids.length !== 1 || states.length !== 1) return null;
-  const final = /(?:^|\n)CI_TASK_ID:\s*(\S+)\s*\nCI_TASK_STATE:\s*(pending|terminal)\s*$/i
+  if (ids.length !== 1 || leases.length !== 1 || states.length !== 1) return null;
+  const final = /(?:^|\n)CI_TASK_ID:\s*(\S+)\s*\nCI_LEASE_ID:\s*(\S+)\s*\nCI_TASK_STATE:\s*(pending|terminal)\s*$/i
     .exec(message.trim());
-  if (!final || !z.string().uuid().safeParse(final[1]).success) return null;
-  return { taskId: final[1]!, state: final[2]!.toLowerCase() as "pending" | "terminal" };
+  if (
+    !final ||
+    !z.string().uuid().safeParse(final[1]).success ||
+    !z.string().uuid().safeParse(final[2]).success
+  ) return null;
+  return {
+    taskId: final[1]!,
+    leaseToken: final[2]!,
+    state: final[3]!.toLowerCase() as "pending" | "terminal",
+  };
 };
 
 export default githubChannel({
@@ -59,6 +70,7 @@ export default githubChannel({
           channel.state.headSha,
           outcome.state === "terminal" ? "completed" : "waiting_for_ci",
           outcome.taskId,
+          outcome.leaseToken,
         );
       }
       if (!data.message) return;
@@ -98,7 +110,7 @@ export default githubChannel({
       }
     }
     if (currentPullRequests.length === 0) return null;
-    const claimed = await database()<Array<{ id: string }>>`
+    const claimed = await database()<Array<{ id: string; lease_token: string }>>`
       with candidate as (
         select t.id
         from tasks t
@@ -112,10 +124,10 @@ export default githubChannel({
         limit 1
       )
       update tasks t
-      set state = 'reviewing', updated_at = now()
+      set state = 'reviewing', lease_token = gen_random_uuid(), updated_at = now()
       from candidate
       where t.id = candidate.id and t.state = 'waiting_for_ci'
-      returning t.id
+      returning t.id, t.lease_token
     `;
     if (claimed.length === 0) return null;
     return {
@@ -123,8 +135,9 @@ export default githubChannel({
       context: [
         `CI check suite ${suite.checkSuiteId} reached a terminal state for ${suite.headSha}.`,
         `The claimed durable CI task is ${claimed[0]!.id}.`,
+        `Its lease is ${claimed[0]!.lease_token}.`,
         `Conclusion: ${suite.conclusion ?? "unknown"}. Re-evaluate any deferred work for this exact head and report the CI outcome.`,
-        `Read all Check Runs and legacy commit statuses. End with CI_TASK_ID: ${claimed[0]!.id} and then exactly CI_TASK_STATE: pending or CI_TASK_STATE: terminal on separate lines.`,
+        `Read all Check Runs and legacy commit statuses. End with CI_TASK_ID: ${claimed[0]!.id}, CI_LEASE_ID: ${claimed[0]!.lease_token}, and then exactly CI_TASK_STATE: pending or CI_TASK_STATE: terminal on separate lines.`,
       ],
     };
   },

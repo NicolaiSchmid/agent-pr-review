@@ -15,28 +15,29 @@ interface DeferredCiTask {
   repository_name: string;
   github_installation_id: string | null;
   pull_request_number: number;
+  lease_token: string;
 }
 
-const release = async (taskId: string) => {
+const release = async (taskId: string, leaseToken: string) => {
   await database()`
     update tasks
     set state = 'waiting_for_ci', updated_at = now()
-    where id = ${taskId} and state = 'reviewing'
+    where id = ${taskId} and state = 'reviewing' and lease_token = ${leaseToken}::uuid
   `;
 };
 
-const complete = async (taskId: string) => {
+const complete = async (taskId: string, leaseToken: string) => {
   await database()`
     update tasks
     set state = 'completed', updated_at = now()
-    where id = ${taskId} and state = 'reviewing'
+    where id = ${taskId} and state = 'reviewing' and lease_token = ${leaseToken}::uuid
   `;
 };
 
-const supersede = async (taskId: string) => {
+const supersede = async (taskId: string, leaseToken: string) => {
   await database()`
     update tasks set state = 'superseded', updated_at = now()
-    where id = ${taskId} and state = 'reviewing'
+    where id = ${taskId} and state = 'reviewing' and lease_token = ${leaseToken}::uuid
   `;
 };
 
@@ -54,6 +55,8 @@ const currentPullRequestHead = async (task: DeferredCiTask) => {
 
 const reportedTerminalCi = async (
   stream: ReadableStream<unknown>,
+  taskId: string,
+  leaseToken: string,
 ): Promise<boolean> => {
   let response = "";
   const reader = stream.getReader();
@@ -69,7 +72,10 @@ const reportedTerminalCi = async (
       response += extractCompletedAssistantText(event as Parameters<typeof extractCompletedAssistantText>[0]);
     }
   }
-  return /(?:^|\n)CI_TASK_STATE:\s*terminal\s*$/i.test(response.trim());
+  return new RegExp(
+    `(?:^|\\n)CI_TASK_ID:\\s*${taskId}\\s*\\nCI_LEASE_ID:\\s*${leaseToken}\\s*\\nCI_TASK_STATE:\\s*terminal\\s*$`,
+    "i",
+  ).test(response.trim());
 };
 
 export default defineSchedule({
@@ -93,11 +99,11 @@ export default defineSchedule({
             limit 25
           )
           update tasks t
-          set state = 'reviewing', updated_at = now()
+          set state = 'reviewing', lease_token = gen_random_uuid(), updated_at = now()
           from candidates x, conversations c
           where t.id = x.id and t.conversation_id = c.id
             and (t.state = 'waiting_for_ci' or (t.state = 'reviewing' and t.updated_at < now() - interval '15 minutes'))
-          returning t.id, t.head_sha, c.repository_id,
+          returning t.id, t.head_sha, t.lease_token, c.repository_id,
             c.repository_owner, c.repository_name, c.github_installation_id,
             c.pull_request_number
         `;
@@ -106,7 +112,7 @@ export default defineSchedule({
           tasks.map(async (task) => {
             try {
               if (await currentPullRequestHead(task) !== task.head_sha.toLowerCase()) {
-                await supersede(task.id);
+                await supersede(task.id, task.lease_token);
                 return;
               }
               const session = await receive(github, {
@@ -114,7 +120,7 @@ export default defineSchedule({
                   `Re-evaluate deferred CI task ${task.id} for exact head ${task.head_sha}.`,
                   "Read both Check Runs and legacy commit statuses with github_repository.",
                   "If any required context is pending, report that it remains deferred. Otherwise report the terminal CI outcome and continue the requested work.",
-                  `End with CI_TASK_ID: ${task.id} and then exactly CI_TASK_STATE: pending or CI_TASK_STATE: terminal on separate lines.`,
+                  `End with CI_TASK_ID: ${task.id}, CI_LEASE_ID: ${task.lease_token}, and then exactly CI_TASK_STATE: pending or CI_TASK_STATE: terminal on separate lines.`,
                 ].join("\n"),
                 target: {
                   owner: task.repository_owner,
@@ -127,11 +133,13 @@ export default defineSchedule({
                 },
                 auth: appAuth,
               });
-              const terminal = await reportedTerminalCi(await session.getEventStream());
-              if (terminal) await complete(task.id);
-              else await release(task.id);
+              const terminal = await reportedTerminalCi(
+                await session.getEventStream(), task.id, task.lease_token,
+              );
+              if (terminal) await complete(task.id, task.lease_token);
+              else await release(task.id, task.lease_token);
             } catch (error) {
-              await release(task.id).catch(() => undefined);
+              await release(task.id, task.lease_token).catch(() => undefined);
               throw error;
             }
           }),

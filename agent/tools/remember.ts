@@ -5,6 +5,11 @@ import { z } from "zod";
 import { database } from "../lib/database.js";
 import { memoryContext } from "../lib/memory-context.js";
 import { memoryScopeKey } from "../lib/memory.js";
+import { connect } from "@vercel/connect/eve";
+import { env } from "../lib/env.js";
+import { requireRepositoryPermission } from "../lib/repository-authorization.js";
+
+const githubAuth = connect({ connector: env.githubConnector, principalType: "app" });
 
 export default defineTool({
   description:
@@ -21,6 +26,15 @@ export default defineTool({
     const { principalId, scopes } = memoryContext(ctx);
     const scope = scopes.find((candidate) => candidate.kind === input.scope);
     if (!scope) throw new Error(`${input.scope} memory is unavailable in this channel context`);
+    if (scope.kind === "repository" || scope.kind === "pull_request") {
+      const repository = ctx.session.auth.current?.attributes.repository;
+      if (typeof repository !== "string" || !repository.includes("/")) {
+        throw new Error("Trusted GitHub repository context is required");
+      }
+      const [owner, repo] = repository.split("/", 2) as [string, string];
+      const { token } = await ctx.getToken(githubAuth);
+      await requireRepositoryPermission(ctx, token, owner, repo, "write");
+    }
     const sql = database();
     await sql`
       insert into principals (id) values (${principalId})

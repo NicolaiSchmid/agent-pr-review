@@ -18,6 +18,9 @@ export default defineTool({
     headSha: z.string().regex(/^[0-9a-f]{40}$/i),
   }),
   async execute(input, ctx) {
+    if (ctx.session.auth.current?.authenticator !== "github-webhook") {
+      throw new Error("CI deferral currently requires a GitHub PR conversation; Slack deferral is not yet supported");
+    }
     const { token } = await ctx.getToken(githubAuth);
     await requireRepositoryPermission(ctx, token, input.owner, input.repo, "read");
     const response = await fetch(
