@@ -100,7 +100,7 @@ const canPublishCiTask = async (
     pull.body.head.sha.toLowerCase() === channel.state.headSha.toLowerCase();
 };
 
-const hostCiTerminal = async (
+const hostCiStatus = async (
   channel: {
     github: { request<T>(input: { method: "GET"; path: string }): Promise<{ body: T }> };
     repository: { owner: string; name: string };
@@ -132,9 +132,13 @@ const hostCiTerminal = async (
     if (statuses.length >= statusTotal || response.body.statuses.length < 100) break;
   }
   if (statuses.length < statusTotal) throw new Error("Commit status verification exceeded pagination bound");
-  return checkTotal + statusTotal > 0 &&
+  const terminal = checkTotal + statusTotal > 0 &&
     checks.every((check) => check.status === "completed" && check.conclusion !== null) &&
     statuses.every((status) => status.state !== "pending");
+  const failed = checks.some((check) =>
+    check.conclusion !== null && !["success", "neutral", "skipped"].includes(check.conclusion)
+  ) || statuses.some((status) => status.state !== "pending" && status.state !== "success");
+  return { terminal, conclusion: failed ? "failure" as const : "success" as const };
 };
 
 const parseCiOutcome = (message: string) => {
@@ -257,9 +261,9 @@ export default githubChannel({
         );
         return;
       }
-      let initiallyTerminal = false;
+      let initialCi: Awaited<ReturnType<typeof hostCiStatus>>;
       try {
-        initiallyTerminal = await hostCiTerminal(channel, channel.state.headSha);
+        initialCi = await hostCiStatus(channel, channel.state.headSha);
       } catch (error) {
         await transitionCiTask(
           String(channel.state.repositoryId), channel.state.pullRequestNumber,
@@ -268,7 +272,7 @@ export default githubChannel({
         ).catch(() => undefined);
         throw error;
       }
-      if (outcome.state !== "terminal" || !initiallyTerminal) {
+      if (outcome.state !== "terminal" || !initialCi.terminal) {
         await transitionCiTask(
           String(channel.state.repositoryId), channel.state.pullRequestNumber,
           channel.state.headSha, "reviewing", "waiting_for_ci",
@@ -305,10 +309,7 @@ export default githubChannel({
         }
       };
       try {
-        if (
-          !await canPublishCiTask(channel, claim.taskId, claim.leaseToken) ||
-          !await hostCiTerminal(channel, channel.state.headSha)
-        ) {
+        if (!await canPublishCiTask(channel, claim.taskId, claim.leaseToken)) {
           await transitionCiTask(
             String(channel.state.repositoryId), channel.state.pullRequestNumber,
             channel.state.headSha, "publishing", "waiting_for_ci",
@@ -316,9 +317,16 @@ export default githubChannel({
           );
           return;
         }
-        const truncated = data.message.length + marker.length + 2 > 60_000;
-        const suffix = `${truncated ? "\n\n_Output truncated to fit one GitHub comment._" : ""}\n\n${marker}`;
-        const body = `${data.message.slice(0, 60_000 - suffix.length)}${suffix}`;
+        const publicationCi = await hostCiStatus(channel, channel.state.headSha);
+        if (!publicationCi.terminal) {
+          await transitionCiTask(
+            String(channel.state.repositoryId), channel.state.pullRequestNumber,
+            channel.state.headSha, "publishing", "waiting_for_ci",
+            claim.taskId, claim.leaseToken,
+          );
+          return;
+        }
+        const body = `Host-verified CI outcome: ${publicationCi.conclusion.toUpperCase()}.\n\n${marker}`;
         let existingCommentId: number | undefined;
         for (let page = 1; !existingCommentId; page += 1) {
           const comments = await channel.github.request<Array<{
@@ -332,9 +340,10 @@ export default githubChannel({
           )?.id;
           if (comments.body.length < 100) break;
         }
+        const immediateCi = await hostCiStatus(channel, channel.state.headSha);
         if (
           !await canPublishCiTask(channel, claim.taskId, claim.leaseToken) ||
-          !await hostCiTerminal(channel, channel.state.headSha)
+          !immediateCi.terminal || immediateCi.conclusion !== publicationCi.conclusion
         ) {
           await transitionCiTask(
             String(channel.state.repositoryId), channel.state.pullRequestNumber,
@@ -353,7 +362,8 @@ export default githubChannel({
           await channel.thread.post(body);
         }
         const stillCurrent = await canPublishCiTask(channel, claim.taskId, claim.leaseToken);
-        const stillTerminal = await hostCiTerminal(channel, channel.state.headSha);
+        const finalCi = await hostCiStatus(channel, channel.state.headSha);
+        const stillTerminal = finalCi.terminal && finalCi.conclusion === publicationCi.conclusion;
         const completed = stillCurrent && stillTerminal && await transitionCiTask(
           String(channel.state.repositoryId), channel.state.pullRequestNumber,
           channel.state.headSha, "publishing",
@@ -397,6 +407,51 @@ export default githubChannel({
     };
   },
   onCheckSuite: async (ctx, suite) => {
+    if ((suite.action === "requested" || suite.action === "rerequested") && suite.headSha) {
+      const completed = await database()<Array<{ id: string; pull_request_number: number }>>`
+        select t.id, c.pull_request_number
+        from tasks t join conversations c on c.id = t.conversation_id
+        where t.repository_id = ${String(ctx.repository.id)}
+          and t.head_sha = ${suite.headSha.toLowerCase()}
+          and t.kind = 'pr_review' and t.state = 'completed'
+          and c.pull_request_number is not null
+      `;
+      for (const task of completed) {
+        const marker = `<!-- eve-ci-result:${task.id} -->`;
+        let commentId: number | undefined;
+        for (let page = 1; !commentId; page += 1) {
+          const comments = await ctx.github.request<Array<{
+            id: number; body?: string; user?: { login?: string; type?: string };
+          }>>({
+            method: "GET",
+            path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/issues/${task.pull_request_number}/comments?per_page=100&page=${page}`,
+          });
+          commentId = comments.body.find(
+            (comment) => isAgentBot(comment.user) && comment.body?.includes(marker),
+          )?.id;
+          if (comments.body.length < 100) break;
+        }
+        if (commentId) {
+          await ctx.github.request({
+            method: "PATCH",
+            path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/issues/comments/${commentId}`,
+            body: { body: `CI was rerun for this commit; the result is pending revalidation.\n\n${marker}` },
+          });
+        }
+        await database()`
+          update tasks t set
+            state = case when exists (
+              select 1 from tasks active
+              where active.id <> t.id and active.conversation_id = t.conversation_id
+                and active.head_sha = t.head_sha and active.kind = 'pr_review'
+                and active.state not in ('completed', 'superseded', 'failed', 'cancelled')
+            ) then 'superseded' else 'waiting_for_ci' end,
+            lease_token = null, updated_at = now()
+          where t.id = ${task.id}::uuid and t.state = 'completed'
+        `;
+      }
+      return null;
+    }
     if (
       suite.action !== "completed" ||
       !suite.headSha ||

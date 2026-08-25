@@ -46,6 +46,7 @@ No runtime secret is needed to install, typecheck, test, or build. Runtime requi
 - `GITHUB_CONNECTOR`: Vercel Connect GitHub connector UID, default `github/eve`.
 - `SLACK_CONNECTOR`: Vercel Connect Slack connector UID, default `slack/eve`.
 - `AGENT_BOT_NAME`: GitHub mention name created by the connector, default `eve`.
+- `GITHUB_BOT_LOGIN`: exact GitHub login used by the connector. This is required for PAT-backed connectors, whose comments GitHub reports as user-authored, so retries and self-comment suppression can identify them safely.
 - `DATABASE_URL`: PostgreSQL connection used for long-term memory and durable orchestration state.
 
 If `GITHUB_SANDBOX_TOKEN` is absent, scoped host tools provide the tree and file contents safely. That supports static review but not arbitrary Git commands or test execution. Set it for the intended full workflow.

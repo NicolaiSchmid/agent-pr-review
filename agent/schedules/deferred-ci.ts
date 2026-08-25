@@ -4,8 +4,6 @@ import github from "../channels/github-connect.js";
 import { database } from "../lib/database.js";
 import { env } from "../lib/env.js";
 
-const credentials = connectGitHubCredentials(env.githubConnector);
-
 class PermanentTargetError extends Error {}
 
 interface DeferredCiTask {
@@ -41,14 +39,17 @@ const cancel = async (taskId: string, leaseToken: string) => {
   `;
 };
 
-const githubToken = async () => {
+const githubToken = async (task: DeferredCiTask) => {
+  const credentials = connectGitHubCredentials(env.githubConnector, {
+    ...(task.github_installation_id ? { installationId: task.github_installation_id } : {}),
+  });
   const source = credentials.installationToken;
   if (!source) throw new Error("GitHub installation token is unavailable");
   return typeof source === "function" ? await source() : source;
 };
 
 const resolveRepository = async (task: DeferredCiTask) => {
-  const token = await githubToken();
+  const token = await githubToken(task);
   const response = await fetch(`${env.githubApiUrl.replace(/\/+$/, "")}/repositories/${task.repository_id}`, {
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" },
   });
@@ -70,7 +71,7 @@ const cleanupStaleResult = async (
   repository: { owner: string; repo: string },
   reason = "CI result superseded by a newer pull-request head.",
 ) => {
-  const token = await githubToken();
+  const token = await githubToken(task);
   const marker = `<!-- eve-ci-result:${task.id} -->`;
   for (let page = 1; ; page += 1) {
     const response = await fetch(
@@ -111,7 +112,7 @@ const currentPullRequestHead = async (
   task: DeferredCiTask,
   repository: { owner: string; repo: string },
 ) => {
-  const token = await githubToken();
+  const token = await githubToken(task);
   const response = await fetch(
     `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/pulls/${task.pull_request_number}`,
     { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
