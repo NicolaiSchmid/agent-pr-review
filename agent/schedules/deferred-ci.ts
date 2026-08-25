@@ -17,7 +17,6 @@ interface DeferredCiTask {
   github_installation_id: string | null;
   pull_request_number: number;
   lease_token: string;
-  claimed_from: "waiting_for_ci" | "reviewing" | "publishing";
 }
 
 const release = async (taskId: string, leaseToken: string) => {
@@ -139,7 +138,7 @@ export default defineSchedule({
       (async () => {
         const tasks = await database()<DeferredCiTask[]>`
           with candidates as (
-            select t.id, t.state as claimed_from
+            select t.id
             from tasks t
             join conversations c on c.id = t.conversation_id
             where (t.state = 'waiting_for_ci' or (t.state in ('reviewing', 'publishing') and t.updated_at < now() - interval '15 minutes'))
@@ -157,7 +156,7 @@ export default defineSchedule({
           from candidates x, conversations c
           where t.id = x.id and t.conversation_id = c.id
             and (t.state = 'waiting_for_ci' or (t.state in ('reviewing', 'publishing') and t.updated_at < now() - interval '15 minutes'))
-          returning t.id, t.head_sha, t.lease_token, x.claimed_from, c.repository_id,
+          returning t.id, t.head_sha, t.lease_token, c.repository_id,
             c.repository_owner, c.repository_name, c.github_installation_id,
             c.pull_request_number
         `;
@@ -166,19 +165,16 @@ export default defineSchedule({
           tasks.map(async (task) => {
             try {
               const repository = await resolveRepository(task);
-              if (task.claimed_from === "publishing") {
-                await cleanupStaleResult(
-                  task, repository,
-                  "CI result publication was interrupted and will be revalidated.",
-                );
-              }
+              await cleanupStaleResult(
+                task, repository,
+                "CI result publication was interrupted and will be revalidated.",
+              );
               const pull = await currentPullRequestHead(task, repository);
               if (!pull.open) {
                 await cancel(task.id, task.lease_token);
                 return;
               }
               if (pull.headSha !== task.head_sha.toLowerCase()) {
-                await cleanupStaleResult(task, repository);
                 await supersede(task.id, task.lease_token);
                 return;
               }
