@@ -227,7 +227,7 @@ export default githubChannel({
       if (!claimed) return;
       const marker = `<!-- eve-ci-result:${claim.taskId} -->`;
       const compensatePublishedComment = async (reason: string) => {
-        for (let page = 1; page <= 30; page += 1) {
+        for (let page = 1; ; page += 1) {
           const comments = await channel.github.request<Array<{
             id: number; body?: string; user?: { login?: string; type?: string };
           }>>({
@@ -247,7 +247,6 @@ export default githubChannel({
           }
           if (comments.body.length < 100) return;
         }
-        throw new Error("CI result comment search exceeded pagination bound");
       };
       try {
         if (
