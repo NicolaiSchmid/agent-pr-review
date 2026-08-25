@@ -158,8 +158,16 @@ export default defineTool({
         }
         const recovered = await existingPull(baseBranch);
         if (recovered) {
-          if (!recovered.draft) throw new Error("Refusing to recover a pull request that is no longer a draft");
+          if (!recovered.draft) {
+            if (operation.pull_request_number === recovered.number) {
+              await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
+            }
+            throw new Error("Refusing to recover a pull request that is no longer a draft");
+          }
           if (recovered.title !== input.title || (recovered.body ?? "") !== operationBody) {
+            if (operation.pull_request_number === recovered.number) {
+              await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
+            }
             throw new Error("Refusing to recover a pull request with different title or body");
           }
           await claimOperationPull(recovered.number);
@@ -340,8 +348,16 @@ export default defineTool({
     };
     const alreadyOpen = await existingPull(baseBranch);
     if (alreadyOpen) {
-      if (!alreadyOpen.draft) throw new Error("Refusing to recover a pull request that is no longer a draft");
+      if (!alreadyOpen.draft) {
+        if (operation.pull_request_number === alreadyOpen.number) {
+          await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
+        }
+        throw new Error("Refusing to recover a pull request that is no longer a draft");
+      }
       if (alreadyOpen.title !== input.title || (alreadyOpen.body ?? "") !== operationBody) {
+        if (operation.pull_request_number === alreadyOpen.number) {
+          await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
+        }
         throw new Error("Refusing to recover a pull request with different title or body");
       }
       await claimOperationPull(alreadyOpen.number);
