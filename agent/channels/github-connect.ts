@@ -326,7 +326,17 @@ export default githubChannel({
           );
           return;
         }
-        const body = `Host-verified CI outcome: ${publicationCi.conclusion.toUpperCase()}.\n\n${marker}`;
+        const continuation = data.message.replace(
+          /(?:^|\n)CI_TASK_ID:\s*\S+\s*\nCI_LEASE_ID:\s*\S+\s*\nCI_TASK_STATE:\s*(?:pending|terminal)\s*$/i,
+          "",
+        ).trim();
+        const prefix = `Host-verified CI outcome: ${publicationCi.conclusion.toUpperCase()}.`;
+        const continuationLabel = continuation
+          ? "\n\nContinuation output (the host verdict above is authoritative):\n\n"
+          : "";
+        const suffix = `\n\n${marker}`;
+        const available = 60_000 - prefix.length - continuationLabel.length - suffix.length;
+        const body = `${prefix}${continuationLabel}${continuation.slice(0, Math.max(0, available))}${suffix}`;
         let existingCommentId: number | undefined;
         for (let page = 1; !existingCommentId; page += 1) {
           const comments = await channel.github.request<Array<{
@@ -417,6 +427,19 @@ export default githubChannel({
           and c.pull_request_number is not null
       `;
       for (const task of completed) {
+        const reopened = await database()<Array<{ state: string }>>`
+          update tasks t set
+            state = case when exists (
+              select 1 from tasks active
+              where active.id <> t.id and active.conversation_id = t.conversation_id
+                and active.head_sha = t.head_sha and active.kind = 'pr_review'
+                and active.state not in ('completed', 'superseded', 'failed', 'cancelled')
+            ) then 'superseded' else 'waiting_for_ci' end,
+            lease_token = null, updated_at = now()
+          where t.id = ${task.id}::uuid and t.state = 'completed'
+          returning t.state
+        `;
+        if (reopened.length !== 1) continue;
         const marker = `<!-- eve-ci-result:${task.id} -->`;
         let commentId: number | undefined;
         for (let page = 1; !commentId; page += 1) {
@@ -438,17 +461,6 @@ export default githubChannel({
             body: { body: `CI was rerun for this commit; the result is pending revalidation.\n\n${marker}` },
           });
         }
-        await database()`
-          update tasks t set
-            state = case when exists (
-              select 1 from tasks active
-              where active.id <> t.id and active.conversation_id = t.conversation_id
-                and active.head_sha = t.head_sha and active.kind = 'pr_review'
-                and active.state not in ('completed', 'superseded', 'failed', 'cancelled')
-            ) then 'superseded' else 'waiting_for_ci' end,
-            lease_token = null, updated_at = now()
-          where t.id = ${task.id}::uuid and t.state = 'completed'
-        `;
       }
       return null;
     }
@@ -527,6 +539,41 @@ export default githubChannel({
   },
   onPullRequest: async (ctx, pullRequest) => {
     if (!pullRequest.headSha || pullRequest.action !== "synchronize") return null;
+    const completed = await database()<Array<{ id: string; head_sha: string }>>`
+      select t.id, t.head_sha from tasks t
+      join conversations c on c.id = t.conversation_id
+      where t.repository_id = ${String(ctx.repository.id)}
+        and c.pull_request_number = ${pullRequest.pullRequestNumber}
+        and t.kind = 'pr_review' and t.state = 'completed'
+        and t.head_sha <> ${pullRequest.headSha.toLowerCase()}
+    `;
+    for (const task of completed) {
+      const marker = `<!-- eve-ci-result:${task.id} -->`;
+      let commentId: number | undefined;
+      for (let page = 1; !commentId; page += 1) {
+        const comments = await ctx.github.request<Array<{
+          id: number; body?: string; user?: { login?: string; type?: string };
+        }>>({
+          method: "GET",
+          path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/issues/${pullRequest.pullRequestNumber}/comments?per_page=100&page=${page}`,
+        });
+        commentId = comments.body.find(
+          (comment) => isAgentBot(comment.user) && comment.body?.includes(marker),
+        )?.id;
+        if (comments.body.length < 100) break;
+      }
+      if (commentId) {
+        await ctx.github.request({
+          method: "PATCH",
+          path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/issues/comments/${commentId}`,
+          body: { body: `Historical CI result for superseded head ${task.head_sha}.\n\n${marker}` },
+        });
+      }
+      await database()`
+        update tasks set state = 'superseded', updated_at = now()
+        where id = ${task.id}::uuid and state = 'completed'
+      `;
+    }
     await database()`
       update tasks t
       set state = 'superseded', updated_at = now()
