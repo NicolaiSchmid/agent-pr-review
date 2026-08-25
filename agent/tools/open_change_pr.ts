@@ -203,7 +203,8 @@ export default defineTool({
             await assertMatchingCommit(recovered.head.sha, await liveBaseSha());
             validatedRecovered = await revalidateRecoveredPull(recovered.number, recovered.head.sha);
           } catch (validationError) {
-            if (validationError instanceof CommitMismatchError && operationOwnsPull(recovered)) {
+            if ((validationError instanceof CommitMismatchError ||
+              validationError instanceof CreatedPullInvariantError) && operationOwnsPull(recovered)) {
               await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
             }
             throw validationError;

@@ -425,14 +425,9 @@ export default githubChannel({
           and kind = 'pr_review' and state in ('reviewing', 'publishing')
       `;
       const completed = await database()<Array<{
-        id: string; pull_request_number: number; has_active: boolean;
+        id: string; pull_request_number: number;
       }>>`
-        select t.id, c.pull_request_number, exists (
-          select 1 from tasks active
-          where active.id <> t.id and active.conversation_id = t.conversation_id
-            and active.head_sha = t.head_sha and active.kind = 'pr_review'
-            and active.state not in ('completed', 'superseded', 'failed', 'cancelled')
-        ) as has_active
+        select t.id, c.pull_request_number
         from tasks t join conversations c on c.id = t.conversation_id
         where t.repository_id = ${String(ctx.repository.id)}
           and t.head_sha = ${suite.headSha.toLowerCase()}
@@ -440,14 +435,36 @@ export default githubChannel({
           and c.pull_request_number is not null
       `;
       for (const task of completed) {
-        if (!task.has_active) {
-          const reopened = await database()<Array<{ id: string }>>`
+        let reopened: Array<{ id: string }> = [];
+        try {
+          reopened = await database()<Array<{ id: string }>>`
             update tasks set state = 'waiting_for_ci', lease_token = null, updated_at = now()
             where id = ${task.id}::uuid and state = 'completed'
+              and not exists (
+                select 1 from tasks active
+                where active.id <> tasks.id
+                  and active.conversation_id = tasks.conversation_id
+                  and active.head_sha = tasks.head_sha and active.kind = 'pr_review'
+                  and active.state not in ('completed', 'superseded', 'failed', 'cancelled')
+              )
             returning id
           `;
-          if (reopened.length !== 1) continue;
+        } catch (error) {
+          if (!(typeof error === "object" && error !== null && "code" in error && error.code === "23505")) {
+            throw error;
+          }
         }
+        const hasActive = reopened.length !== 1 && (await database()<Array<{ id: string }>>`
+          select t.id from tasks t
+          where t.id = ${task.id}::uuid and t.state = 'completed'
+            and exists (
+              select 1 from tasks active
+              where active.id <> t.id and active.conversation_id = t.conversation_id
+                and active.head_sha = t.head_sha and active.kind = 'pr_review'
+                and active.state not in ('completed', 'superseded', 'failed', 'cancelled')
+            )
+        `).length === 1;
+        if (reopened.length !== 1 && !hasActive) continue;
         const marker = `<!-- eve-ci-result:${task.id} -->`;
         let commentId: number | undefined;
         for (let page = 1; !commentId; page += 1) {
@@ -466,12 +483,12 @@ export default githubChannel({
           await ctx.github.request({
             method: "PATCH",
             path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/issues/comments/${commentId}`,
-            body: { body: `${task.has_active
+            body: { body: `${hasActive
               ? "CI result superseded by another active task for this commit."
               : "CI was rerun for this commit; the result is pending revalidation."}\n\n${marker}` },
           });
         }
-        if (task.has_active) {
+        if (hasActive) {
           await database()`
             update tasks set state = 'superseded', lease_token = null, updated_at = now()
             where id = ${task.id}::uuid and state = 'completed'
