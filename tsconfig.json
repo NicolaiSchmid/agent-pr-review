@@ -10,5 +10,5 @@
     "noEmit": true,
     "types": ["node", "vitest/globals"]
   },
-  "include": ["agent/**/*.ts"]
+  "include": ["agent/**/*.ts", "convex/**/*.ts"]
 }

@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { connect } from "@vercel/connect/eve";
 import { defineTool } from "eve/tools";
 import { always } from "eve/tools/approval";
 import { z } from "zod";
-import { database } from "../lib/database.js";
+import { store } from "../lib/database.js";
 import { env } from "../lib/env.js";
 import { requireRepositoryPermission } from "../lib/repository-authorization.js";
 
@@ -130,10 +130,8 @@ export default defineTool({
         } catch (error) {
           let binding: number | null;
           try {
-            const reconciled = await database()<Array<{ pull_request_number: number | null }>>`
-              select pull_request_number from change_operations where id = ${operation.id}::uuid
-            `;
-            binding = reconciled[0]?.pull_request_number ?? null;
+            const reconciled = await store.getOperation<{ pull_request_number: number | null } | null>(operation.id);
+            binding = reconciled?.pull_request_number ?? null;
           } catch {
             throw error;
           }
@@ -236,28 +234,20 @@ export default defineTool({
       commitMessage: input.commitMessage,
       files: input.files,
     })).digest("hex");
-    const operations = await database()<Array<{ id: string; pull_request_number: number | null }>>`
-      insert into change_operations (
-        request_fingerprint, repository_owner, repository_name, branch
-      ) values (
-        ${operationFingerprint}, ${input.owner.toLowerCase()}, ${input.repo.toLowerCase()}, ${input.branch}
-      )
-      on conflict (request_fingerprint) do update set updated_at = change_operations.updated_at
-      returning id, pull_request_number
-    `;
-    const operation = operations[0]!;
+    const operation = await store.getOrCreateOperation<{
+      id: string; pull_request_number: number | null;
+    }>({
+      externalId: randomUUID(), requestFingerprint: operationFingerprint,
+      repositoryOwner: input.owner.toLowerCase(), repositoryName: input.repo.toLowerCase(),
+      branch: input.branch,
+    });
     const operationBody = `${input.body}\n\n<!-- eve-change-operation:${operation.id} -->`;
     const operationOwnsPull = (pull: { number: number; body: string | null }) =>
       (pull.body ?? "") === operationBody &&
       (operation.pull_request_number === null || operation.pull_request_number === pull.number);
     const claimOperationPull = async (number: number) => {
-      const claimed = await database()<Array<{ id: string }>>`
-        update change_operations set pull_request_number = ${number}, updated_at = now()
-        where id = ${operation.id}::uuid
-          and (pull_request_number is null or pull_request_number = ${number})
-        returning id
-      `;
-      if (claimed.length !== 1) throw new Error("Change operation is already bound to another pull request");
+      const claimed = await store.claimOperationPull(operation.id, number);
+      if (!claimed) throw new Error("Change operation is already bound to another pull request");
       operation.pull_request_number = number;
     };
     const fingerprintFor = (baseSha: string) => createHash("sha256").update(JSON.stringify({

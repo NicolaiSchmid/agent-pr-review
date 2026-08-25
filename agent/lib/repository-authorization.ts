@@ -1,5 +1,5 @@
 import type { SessionContext } from "eve/context";
-import { database } from "./database.js";
+import { store } from "./database.js";
 import { env } from "./env.js";
 
 type RequiredPermission = "read" | "write";
@@ -21,14 +21,9 @@ const githubLoginFor = async (ctx: SessionContext): Promise<string | null> => {
     return webhookLogin;
   }
   if (auth.principalType !== "user") return null;
-  const identities = await database()<Array<{ provider_user_id: string; provider_login: string | null }>>`
-    select provider_user_id, provider_login
-    from principal_identities
-    where principal_id = ${auth.principalId} and provider = 'github'
-    order by verified_at desc
-    limit 1
-  `;
-  const identity = identities[0];
+  const identity = await store.githubIdentity<{
+    provider_user_id: string; provider_login: string | null;
+  } | null>(auth.principalId);
   if (!identity) return null;
   return /^\d+$/.test(identity.provider_user_id)
     ? identity.provider_user_id

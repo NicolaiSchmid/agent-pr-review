@@ -1,7 +1,7 @@
 import { defineSchedule } from "eve/schedules";
 import { connectGitHubCredentials } from "@vercel/connect/eve";
 import github from "../channels/github-connect.js";
-import { database } from "../lib/database.js";
+import { store } from "../lib/database.js";
 import { env } from "../lib/env.js";
 
 class PermanentTargetError extends Error {}
@@ -18,25 +18,15 @@ interface DeferredCiTask {
 }
 
 const release = async (taskId: string, leaseToken: string) => {
-  await database()`
-    update tasks
-    set state = 'waiting_for_ci', updated_at = now()
-    where id = ${taskId} and state = 'reviewing' and lease_token = ${leaseToken}::uuid
-  `;
+  await store.settleLease(taskId, leaseToken, "waiting_for_ci");
 };
 
 const supersede = async (taskId: string, leaseToken: string) => {
-  await database()`
-    update tasks set state = 'superseded', updated_at = now()
-    where id = ${taskId} and state = 'reviewing' and lease_token = ${leaseToken}::uuid
-  `;
+  await store.settleLease(taskId, leaseToken, "superseded");
 };
 
 const cancel = async (taskId: string, leaseToken: string) => {
-  await database()`
-    update tasks set state = 'cancelled', updated_at = now()
-    where id = ${taskId} and state = 'reviewing' and lease_token = ${leaseToken}::uuid
-  `;
+  await store.settleLease(taskId, leaseToken, "cancelled");
 };
 
 const githubToken = async (task: DeferredCiTask) => {
@@ -140,30 +130,7 @@ export default defineSchedule({
   run({ receive, waitUntil, appAuth }) {
     waitUntil(
       (async () => {
-        const tasks = await database()<DeferredCiTask[]>`
-          with candidates as (
-            select t.id
-            from tasks t
-            join conversations c on c.id = t.conversation_id
-            where (t.state = 'waiting_for_ci' or (t.state in ('reviewing', 'publishing') and t.updated_at < now() - interval '15 minutes'))
-              and t.head_sha is not null
-              and c.repository_id is not null
-              and c.repository_owner is not null
-              and c.repository_name is not null
-              and c.pull_request_number is not null
-            order by t.updated_at, t.created_at
-            for update of t skip locked
-            limit 25
-          )
-          update tasks t
-          set state = 'reviewing', lease_token = gen_random_uuid(), updated_at = now()
-          from candidates x, conversations c
-          where t.id = x.id and t.conversation_id = c.id
-            and (t.state = 'waiting_for_ci' or (t.state in ('reviewing', 'publishing') and t.updated_at < now() - interval '15 minutes'))
-          returning t.id, t.head_sha, t.lease_token, c.repository_id,
-            c.repository_owner, c.repository_name, c.github_installation_id,
-            c.pull_request_number
-        `;
+        const tasks = await store.claimDeferred<DeferredCiTask[]>(25, Date.now() - 15 * 60_000);
 
         await Promise.allSettled(
           tasks.map(async (task) => {

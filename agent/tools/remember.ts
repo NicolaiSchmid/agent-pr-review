@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { defineTool } from "eve/tools";
 import { always } from "eve/tools/approval";
 import { z } from "zod";
-import { database } from "../lib/database.js";
+import { store } from "../lib/database.js";
 import { memoryContext } from "../lib/memory-context.js";
 import { memoryScopeKey } from "../lib/memory.js";
 import { connect } from "@vercel/connect/eve";
@@ -35,22 +35,14 @@ export default defineTool({
       const { token } = await ctx.getToken(githubAuth);
       await requireRepositoryPermission(ctx, token, owner, repo, "write");
     }
-    const sql = database();
-    await sql`
-      insert into principals (id) values (${principalId})
-      on conflict (id) do nothing
-    `;
     const id = randomUUID();
     const key = memoryScopeKey(scope);
-    await sql`
-      insert into memory_records
-        (id, scope_kind, scope_key, content, tags, source_url,
-         author_principal_id, status, expires_at)
-      values
-        (${id}, ${scope.kind}, ${key}, ${input.content}, ${input.tags},
-         ${input.sourceUrl ?? null}, ${principalId}, 'confirmed',
-         ${input.expiresAt ?? null})
-    `;
+    await store.saveMemory({
+      id, scopeKind: scope.kind, scopeKey: key, content: input.content,
+      tags: input.tags, ...(input.sourceUrl ? { sourceUrl: input.sourceUrl } : {}),
+      authorPrincipalId: principalId,
+      ...(input.expiresAt ? { expiresAt: Date.parse(input.expiresAt) } : {}),
+    });
     return { saved: true, id, scope: key };
   },
 });

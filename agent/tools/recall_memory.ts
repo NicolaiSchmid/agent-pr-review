@@ -1,6 +1,6 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import { database } from "../lib/database.js";
+import { store } from "../lib/database.js";
 import { memoryContext } from "../lib/memory-context.js";
 import { memoryScopeKey } from "../lib/memory.js";
 
@@ -11,18 +11,7 @@ export default defineTool({
   async execute({ query, limit }, ctx) {
     const { scopes } = memoryContext(ctx);
     const keys = scopes.map(memoryScopeKey);
-    const sql = database();
-    const rows = await sql`
-      select id, scope_kind, scope_key, content, tags, source_url,
-             author_principal_id, status, created_at, expires_at
-      from memory_records
-      where scope_key = any(${keys})
-        and status = 'confirmed'
-        and (expires_at is null or expires_at > now())
-        and content ilike ${`%${query}%`}
-      order by updated_at desc
-      limit ${limit}
-    `;
+    const rows = await store.searchMemories<unknown[]>({ scopeKeys: keys, query, limit });
     return { memories: rows };
   },
 });

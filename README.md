@@ -8,7 +8,7 @@ A steerable Eve engineering agent with an evidence-gated pull-request reviewer a
 - GitHub `@mention` conversations through Vercel Connect: implemented; connector provisioning required.
 - Slack mentions, DMs, threaded continuation, and interactive approvals through Vercel Connect: implemented for conversation and user-scoped memory. Repository tools require a deployment-provisioned verified Slack-to-GitHub identity link containing the stable GitHub user ID and current account login (`principal_identities.provider_user_id` and `provider_login`); an in-agent linking flow is not yet implemented.
 - CI terminal-event continuation and task-state primitives: implemented. Full required-check discovery, settling windows, durable deadlines, and automatic deferral of the legacy webhook are the next orchestration increment.
-- User, repository, and PR memory schemas, PostgreSQL adapter, retrieval, confirmed writes, provenance, and author-controlled forgetting: implemented. Apply `db/schema.sql` before enabling memory. Organization memory remains schema-only until verified organization membership and Slack-to-GitHub identity linking are wired; Slack receives only its user-scoped memory.
+- User, repository, and PR memory schemas, Convex persistence, retrieval, confirmed writes, provenance, and author-controlled forgetting: implemented. Convex also owns durable CI leases and idempotent change operations, and its reactive data model is ready for a future UI. Organization memory remains schema-only until verified organization membership and Slack-to-GitHub identity linking are wired; Slack receives only its user-scoped memory.
 - Generic approval-gated draft PR creation for any connector-authorized repository, including this repository: implemented for complete file replacements. Sandbox-generated patch capture and automatic test-evidence attachment remain to be wired.
 
 Fable 5 is used at standard inference speed. Anthropic's literal `speed: "fast"` mode does not currently support Fable 5; do not enable that provider option until Anthropic adds support.
@@ -47,7 +47,8 @@ No runtime secret is needed to install, typecheck, test, or build. Runtime requi
 - `SLACK_CONNECTOR`: Vercel Connect Slack connector UID, default `slack/eve`.
 - `AGENT_BOT_NAME`: GitHub mention name created by the connector, default `eve`.
 - `GITHUB_BOT_LOGIN`: exact GitHub login used by the connector. This is required for PAT-backed connectors, whose comments GitHub reports as user-authored, so retries and self-comment suppression can identify them safely.
-- `DATABASE_URL`: PostgreSQL connection used for long-term memory and durable orchestration state.
+- `CONVEX_URL`: URL of the Convex deployment used for long-term memory and durable orchestration state.
+- `CONVEX_AGENT_SECRET`: high-entropy shared secret configured in both the agent runtime and the Convex deployment. It protects agent-only queries and mutations; do not expose it to a browser.
 
 If `GITHUB_SANDBOX_TOKEN` is absent, scoped host tools provide the tree and file contents safely. That supports static review but not arbitrary Git commands or test execution. Set it for the intended full workflow.
 
@@ -62,11 +63,14 @@ vercel connect attach slack/eve --triggers --trigger-path /eve/v1/slack
 
 The existing signed `/webhook` endpoint remains available during migration for automatic PR review. Connect-backed mentions use `/eve/v1/github`; Slack uses `/eve/v1/slack`.
 
-Apply the durable-state schema to the configured database before using memory:
+Create or select a Convex project, configure the agent-only secret in the Convex deployment, and run the backend during development:
 
 ```bash
-psql "$DATABASE_URL" -f db/schema.sql
+pnpm convex:dev
+npx convex env set CONVEX_AGENT_SECRET "$CONVEX_AGENT_SECRET"
 ```
+
+`convex/schema.ts` defines the durable data model and indexes. `convex/store.ts` contains transactional agent operations. A future UI should add authenticated, least-privilege query functions rather than receive `CONVEX_AGENT_SECRET`.
 
 ## GitHub Configuration
 
@@ -97,6 +101,7 @@ A GitHub App is the production recommendation because installation-scoped, short
 Deploy as a normal Eve application on Vercel and set the runtime environment variables there. Eve selects Vercel Sandbox in deployment. Its egress policy permits only GitHub/GitHubusercontent plus npm and pnpm registry hosts required to install and test `nunc-immo`; local Docker fallback is deny-all.
 
 ```bash
+pnpm convex:deploy
 pnpm verify
 pnpm build
 ```
@@ -119,7 +124,7 @@ Set `ALLOW_FORK_EXECUTION=true` only after explicitly accepting that untrusted f
 - GitHub API pagination has a hard safety bound and errors include status/context but never credentials.
 - Prompt injection in repository content is explicitly treated as untrusted data.
 
-Residual v1 limitations: GitHub may omit `patch` for very large/binary files, so inline findings on those files are conservatively dropped; PRs with more than 3,000 changed files cannot be reviewed through this API and fail clearly; no external database or queue is used beyond Eve durability and GitHub state; a GitHub App token provider is not yet implemented; and fork execution is a coarse deployment-wide opt-in. GitHub serializes pending reviews per user, which makes publication idempotent. Submission and a concurrent push remain separate external mutations, but the post-submit check now compensates that race by withdrawing the submitted review’s actionable content. During the brief interval before compensation completes, GitHub may momentarily display stale comments; retries resume cleanup until none remain.
+Residual v1 limitations: GitHub may omit `patch` for very large/binary files, so inline findings on those files are conservatively dropped; PRs with more than 3,000 changed files cannot be reviewed through this API and fail clearly; a GitHub App token provider is not yet implemented; and fork execution is a coarse deployment-wide opt-in. GitHub serializes pending reviews per user, which makes publication idempotent. Submission and a concurrent push remain separate external mutations, but the post-submit check now compensates that race by withdrawing the submitted review’s actionable content. During the brief interval before compensation completes, GitHub may momentarily display stale comments; retries resume cleanup until none remain.
 
 ## Why This Design
 

@@ -1,7 +1,7 @@
 import { defineTool } from "eve/tools";
 import { always } from "eve/tools/approval";
 import { z } from "zod";
-import { database } from "../lib/database.js";
+import { store } from "../lib/database.js";
 import { memoryContext } from "../lib/memory-context.js";
 import { memoryScopeKey } from "../lib/memory.js";
 
@@ -13,16 +13,7 @@ export default defineTool({
   async execute({ id }, ctx) {
     const { principalId, scopes } = memoryContext(ctx);
     const keys = scopes.map(memoryScopeKey);
-    const sql = database();
-    const rows = await sql`
-      update memory_records
-      set status = 'superseded', updated_at = now()
-      where id = ${id}
-        and author_principal_id = ${principalId}
-        and scope_key = any(${keys})
-        and status <> 'superseded'
-      returning id
-    `;
-    return { superseded: rows.length === 1, id };
+    const superseded = await store.supersedeMemory({ id, principalId, scopeKeys: keys });
+    return { superseded, id };
   },
 });

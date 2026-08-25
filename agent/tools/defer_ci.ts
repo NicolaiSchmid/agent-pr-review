@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { connect } from "@vercel/connect/eve";
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import { database } from "../lib/database.js";
+import { store } from "../lib/database.js";
 import { env } from "../lib/env.js";
 import { requireRepositoryPermission } from "../lib/repository-authorization.js";
 
@@ -56,36 +56,12 @@ export default defineTool({
     const taskId = randomUUID();
     const key = `github:${repositoryId}#${input.pullRequestNumber}`;
     const installation = ctx.session.auth.current?.attributes.installation_id;
-    const rows = await database()<Array<{ id: string }>>`
-      with conversation as (
-        insert into conversations (
-          id, conversation_key, source, repository_id, repository_owner,
-          repository_name, github_installation_id, pull_request_number
-        ) values (
-          ${conversationId}, ${key}, 'github', ${repositoryId}, ${input.owner},
-          ${input.repo}, ${typeof installation === "string" && installation ? installation : null},
-          ${input.pullRequestNumber}
-        )
-        on conflict (conversation_key) do update set
-          repository_id = excluded.repository_id,
-          repository_owner = excluded.repository_owner,
-          repository_name = excluded.repository_name,
-          github_installation_id = coalesce(excluded.github_installation_id, conversations.github_installation_id),
-          pull_request_number = excluded.pull_request_number,
-          updated_at = now()
-        returning id
-      )
-      insert into tasks (id, conversation_id, kind, state, repository_id, head_sha)
-      select ${taskId}, conversation.id, 'pr_review', 'waiting_for_ci', ${repositoryId}, ${headSha}
-      from conversation
-      on conflict (conversation_id, head_sha)
-        where kind = 'pr_review' and state not in ('completed', 'superseded', 'failed', 'cancelled')
-      do update set updated_at = case
-        when tasks.state = 'waiting_for_ci' then now()
-        else tasks.updated_at
-      end
-      returning id
-    `;
-    return { taskId: rows[0]!.id, state: "waiting_for_ci", headSha };
+    const durableTaskId = await store.deferCi({
+      conversationId, taskId, conversationKey: key, repositoryId,
+      repositoryOwner: input.owner, repositoryName: input.repo,
+      ...(typeof installation === "string" && installation ? { githubInstallationId: installation } : {}),
+      pullRequestNumber: input.pullRequestNumber, headSha,
+    });
+    return { taskId: durableTaskId, state: "waiting_for_ci", headSha };
   },
 });

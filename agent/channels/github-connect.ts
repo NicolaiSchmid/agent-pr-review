@@ -1,6 +1,6 @@
 import { connectGitHubCredentials } from "@vercel/connect/eve";
 import { defaultGitHubAuth, githubChannel } from "eve/channels/github";
-import { database } from "../lib/database.js";
+import { store } from "../lib/database.js";
 import { env } from "../lib/env.js";
 import { z } from "zod";
 
@@ -23,21 +23,9 @@ const transitionCiTask = async (
   taskId: string,
   leaseToken: string,
 ) => {
-  const rows = await database()<Array<{ id: string }>>`
-    update tasks t
-    set state = ${state}, updated_at = now()
-    from conversations c
-    where t.conversation_id = c.id
-      and t.repository_id = ${repositoryId}
-      and t.head_sha = ${headSha}
-      and t.state = ${from}
-      and t.kind = 'pr_review'
-      and c.pull_request_number = ${pullRequestNumber}
-      and t.id = ${taskId}::uuid
-      and t.lease_token = ${leaseToken}::uuid
-    returning t.id
-  `;
-  return rows.length === 1;
+  return store.transitionTask({
+    repositoryId, pullRequestNumber, headSha, from, to: state, taskId, leaseToken,
+  });
 };
 
 const completedCiTask = async (
@@ -47,14 +35,9 @@ const completedCiTask = async (
   taskId: string,
   leaseToken: string,
 ) => {
-  const rows = await database()<Array<{ id: string }>>`
-    select t.id from tasks t
-    join conversations c on c.id = t.conversation_id
-    where t.id = ${taskId}::uuid and t.lease_token = ${leaseToken}::uuid
-      and t.state = 'completed' and t.repository_id = ${repositoryId}
-      and t.head_sha = ${headSha} and c.pull_request_number = ${pullRequestNumber}
-  `;
-  return rows.length === 1;
+  return store.taskMatches({
+    repositoryId, pullRequestNumber, headSha, state: "completed", taskId, leaseToken,
+  });
 };
 
 const trustedCiClaim = (ctx: { session: { auth: { initiator: { attributes: Readonly<Record<string, string | readonly string[]>> } | null } } }) => {
@@ -79,15 +62,11 @@ const canPublishCiTask = async (
   leaseToken: string,
 ) => {
   if (!channel.state.pullRequestNumber || !channel.state.headSha) return false;
-  const rows = await database()<Array<{ id: string }>>`
-    select t.id from tasks t
-    join conversations c on c.id = t.conversation_id
-    where t.id = ${taskId}::uuid and t.lease_token = ${leaseToken}::uuid
-      and t.state = 'publishing' and t.repository_id = ${String(channel.state.repositoryId)}
-      and t.head_sha = ${channel.state.headSha}
-      and c.pull_request_number = ${channel.state.pullRequestNumber}
-  `;
-  if (rows.length !== 1) return false;
+  if (!await store.taskMatches({
+    repositoryId: String(channel.state.repositoryId),
+    pullRequestNumber: channel.state.pullRequestNumber,
+    headSha: channel.state.headSha, state: "publishing", taskId, leaseToken,
+  })) return false;
   const pull = await channel.github.request<{
     head: { sha: string };
     merged: boolean;
@@ -418,53 +397,10 @@ export default githubChannel({
   },
   onCheckSuite: async (ctx, suite) => {
     if ((suite.action === "requested" || suite.action === "rerequested") && suite.headSha) {
-      await database()`
-        update tasks set state = 'waiting_for_ci', lease_token = null, updated_at = now()
-        where repository_id = ${String(ctx.repository.id)}
-          and head_sha = ${suite.headSha.toLowerCase()}
-          and kind = 'pr_review' and state in ('reviewing', 'publishing')
-      `;
-      const completed = await database()<Array<{
-        id: string; pull_request_number: number;
-      }>>`
-        select t.id, c.pull_request_number
-        from tasks t join conversations c on c.id = t.conversation_id
-        where t.repository_id = ${String(ctx.repository.id)}
-          and t.head_sha = ${suite.headSha.toLowerCase()}
-          and t.kind = 'pr_review' and t.state = 'completed'
-          and c.pull_request_number is not null
-      `;
+      const completed = await store.rerun<Array<{
+        id: string; pull_request_number: number; has_active: boolean;
+      }>>(String(ctx.repository.id), suite.headSha.toLowerCase());
       for (const task of completed) {
-        let reopened: Array<{ id: string }> = [];
-        try {
-          reopened = await database()<Array<{ id: string }>>`
-            update tasks set state = 'waiting_for_ci', lease_token = null, updated_at = now()
-            where id = ${task.id}::uuid and state = 'completed'
-              and not exists (
-                select 1 from tasks active
-                where active.id <> tasks.id
-                  and active.conversation_id = tasks.conversation_id
-                  and active.head_sha = tasks.head_sha and active.kind = 'pr_review'
-                  and active.state not in ('completed', 'superseded', 'failed', 'cancelled')
-              )
-            returning id
-          `;
-        } catch (error) {
-          if (!(typeof error === "object" && error !== null && "code" in error && error.code === "23505")) {
-            throw error;
-          }
-        }
-        const hasActive = reopened.length !== 1 && (await database()<Array<{ id: string }>>`
-          select t.id from tasks t
-          where t.id = ${task.id}::uuid and t.state = 'completed'
-            and exists (
-              select 1 from tasks active
-              where active.id <> t.id and active.conversation_id = t.conversation_id
-                and active.head_sha = t.head_sha and active.kind = 'pr_review'
-                and active.state not in ('completed', 'superseded', 'failed', 'cancelled')
-            )
-        `).length === 1;
-        if (reopened.length !== 1 && !hasActive) continue;
         const marker = `<!-- eve-ci-result:${task.id} -->`;
         let commentId: number | undefined;
         for (let page = 1; !commentId; page += 1) {
@@ -483,17 +419,10 @@ export default githubChannel({
           await ctx.github.request({
             method: "PATCH",
             path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/issues/comments/${commentId}`,
-            body: { body: `${hasActive
-              ? "CI result superseded by another active task for this commit."
-              : "CI was rerun for this commit; the result is pending revalidation."}\n\n${marker}` },
+            body: { body: `CI was rerun for this commit; the previous result is invalid and pending reconciliation.\n\n${marker}` },
           });
         }
-        if (hasActive) {
-          await database()`
-            update tasks set state = 'superseded', lease_token = null, updated_at = now()
-            where id = ${task.id}::uuid and state = 'completed'
-          `;
-        }
+        await store.finalizeRerun(task.id);
       }
       return null;
     }
@@ -515,71 +444,41 @@ export default githubChannel({
         path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/pulls/${number}`,
       });
       if (response.body.state !== "open" || response.body.merged) {
-        await database()`
-          update tasks t
-          set state = 'cancelled', updated_at = now()
-          from conversations c
-          where t.conversation_id = c.id
-            and t.repository_id = ${String(ctx.repository.id)}
-            and c.pull_request_number = ${number}
-            and t.kind = 'pr_review'
-            and t.state in ('queued', 'waiting_for_ci', 'reviewing', 'waiting_for_user')
-        `;
+        await store.cancelPullTasks(String(ctx.repository.id), number);
       } else if (response.body.head.sha.toLowerCase() === suite.headSha.toLowerCase()) {
         currentPullRequests.push(number);
       }
     }
     if (currentPullRequests.length === 0) return null;
-    const claimed = await database()<Array<{ id: string; lease_token: string }>>`
-      with candidate as (
-        select t.id
-        from tasks t
-        join conversations c on c.id = t.conversation_id
-        where t.repository_id = ${String(ctx.repository.id)}
-          and t.head_sha = ${suite.headSha.toLowerCase()}
-          and t.state = 'waiting_for_ci'
-          and c.pull_request_number = any(${currentPullRequests})
-        order by t.created_at
-        for update of t skip locked
-        limit 1
-      )
-      update tasks t
-      set state = 'reviewing', lease_token = gen_random_uuid(), updated_at = now()
-      from candidate
-      where t.id = candidate.id and t.state = 'waiting_for_ci'
-      returning t.id, t.lease_token
-    `;
-    if (claimed.length === 0) return null;
+    const claimed = await store.claimWaiting<{ id: string; lease_token: string } | null>(
+      String(ctx.repository.id), suite.headSha.toLowerCase(), currentPullRequests,
+    );
+    if (!claimed) return null;
     const auth = defaultGitHubAuth(ctx);
     return {
       auth: {
         ...auth,
         attributes: {
           ...auth.attributes,
-          ci_task_id: claimed[0]!.id,
-          ci_lease_id: claimed[0]!.lease_token,
+          ci_task_id: claimed.id,
+          ci_lease_id: claimed.lease_token,
           repository: ctx.repository.fullName,
         },
       },
       context: [
         `CI check suite ${suite.checkSuiteId} reached a terminal state for ${suite.headSha}.`,
-        `The claimed durable CI task is ${claimed[0]!.id}.`,
-        `Its lease is ${claimed[0]!.lease_token}.`,
+        `The claimed durable CI task is ${claimed.id}.`,
+        `Its lease is ${claimed.lease_token}.`,
         `Conclusion: ${suite.conclusion ?? "unknown"}. Re-evaluate any deferred work for this exact head and report the CI outcome.`,
-        `Read all Check Runs and legacy commit statuses. End with CI_TASK_ID: ${claimed[0]!.id}, CI_LEASE_ID: ${claimed[0]!.lease_token}, and then exactly CI_TASK_STATE: pending or CI_TASK_STATE: terminal on separate lines.`,
+        `Read all Check Runs and legacy commit statuses. End with CI_TASK_ID: ${claimed.id}, CI_LEASE_ID: ${claimed.lease_token}, and then exactly CI_TASK_STATE: pending or CI_TASK_STATE: terminal on separate lines.`,
       ],
     };
   },
   onPullRequest: async (ctx, pullRequest) => {
     if (!pullRequest.headSha || pullRequest.action !== "synchronize") return null;
-    const completed = await database()<Array<{ id: string; head_sha: string }>>`
-      select t.id, t.head_sha from tasks t
-      join conversations c on c.id = t.conversation_id
-      where t.repository_id = ${String(ctx.repository.id)}
-        and c.pull_request_number = ${pullRequest.pullRequestNumber}
-        and t.kind = 'pr_review' and t.state = 'completed'
-        and t.head_sha <> ${pullRequest.headSha.toLowerCase()}
-    `;
+    const completed = await store.supersedeOldHeads<Array<{ id: string; head_sha: string }>>(
+      String(ctx.repository.id), pullRequest.pullRequestNumber, pullRequest.headSha.toLowerCase(),
+    );
     for (const task of completed) {
       const marker = `<!-- eve-ci-result:${task.id} -->`;
       let commentId: number | undefined;
@@ -602,22 +501,8 @@ export default githubChannel({
           body: { body: `Historical CI result for superseded head ${task.head_sha}.\n\n${marker}` },
         });
       }
-      await database()`
-        update tasks set state = 'superseded', updated_at = now()
-        where id = ${task.id}::uuid and state = 'completed'
-      `;
+      await store.supersedeCompleted(task.id);
     }
-    await database()`
-      update tasks t
-      set state = 'superseded', updated_at = now()
-      from conversations c
-      where t.conversation_id = c.id
-        and t.repository_id = ${String(ctx.repository.id)}
-        and c.pull_request_number = ${pullRequest.pullRequestNumber}
-        and t.kind = 'pr_review'
-        and t.head_sha <> ${pullRequest.headSha.toLowerCase()}
-        and t.state in ('queued', 'waiting_for_ci', 'reviewing', 'waiting_for_user')
-    `;
     return null;
   },
 });
