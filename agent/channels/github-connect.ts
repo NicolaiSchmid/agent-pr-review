@@ -215,7 +215,17 @@ export default githubChannel({
       );
       if (!claimed) return;
       try {
-        if (!await canPublishCiTask(channel, claim.taskId, claim.leaseToken)) return;
+        if (
+          !await canPublishCiTask(channel, claim.taskId, claim.leaseToken) ||
+          !await hostCiTerminal(channel, channel.state.headSha)
+        ) {
+          await transitionCiTask(
+            String(channel.state.repositoryId), channel.state.pullRequestNumber,
+            channel.state.headSha, "publishing", "waiting_for_ci",
+            claim.taskId, claim.leaseToken,
+          );
+          return;
+        }
         const marker = `<!-- eve-ci-result:${claim.taskId} -->`;
         const truncated = data.message.length + marker.length + 2 > 60_000;
         const suffix = `${truncated ? "\n\n_Output truncated to fit one GitHub comment._" : ""}\n\n${marker}`;
@@ -233,7 +243,17 @@ export default githubChannel({
           )?.id;
           if (comments.body.length < 100) break;
         }
-        if (!await canPublishCiTask(channel, claim.taskId, claim.leaseToken)) return;
+        if (
+          !await canPublishCiTask(channel, claim.taskId, claim.leaseToken) ||
+          !await hostCiTerminal(channel, channel.state.headSha)
+        ) {
+          await transitionCiTask(
+            String(channel.state.repositoryId), channel.state.pullRequestNumber,
+            channel.state.headSha, "publishing", "waiting_for_ci",
+            claim.taskId, claim.leaseToken,
+          );
+          return;
+        }
         let publishedCommentId: number;
         if (existingCommentId) {
           await channel.github.request({
@@ -246,7 +266,8 @@ export default githubChannel({
           publishedCommentId = (await channel.thread.post(body)).id;
         }
         const stillCurrent = await canPublishCiTask(channel, claim.taskId, claim.leaseToken);
-        const completed = stillCurrent && await transitionCiTask(
+        const stillTerminal = await hostCiTerminal(channel, channel.state.headSha);
+        const completed = stillCurrent && stillTerminal && await transitionCiTask(
           String(channel.state.repositoryId), channel.state.pullRequestNumber,
           channel.state.headSha, "publishing",
           "completed",
@@ -256,11 +277,11 @@ export default githubChannel({
           await channel.github.request({
             method: "PATCH",
             path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${publishedCommentId}`,
-            body: { body: `CI result superseded before publication completed.\n\n${marker}` },
+            body: { body: `${stillCurrent && !stillTerminal ? "CI returned to a pending state" : "CI result superseded"} before publication completed.\n\n${marker}` },
           });
           await transitionCiTask(
             String(channel.state.repositoryId), channel.state.pullRequestNumber,
-            channel.state.headSha, "publishing", "superseded",
+            channel.state.headSha, "publishing", stillCurrent ? "waiting_for_ci" : "superseded",
             claim.taskId, claim.leaseToken,
           );
         }

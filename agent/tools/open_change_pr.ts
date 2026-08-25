@@ -127,7 +127,7 @@ export default defineTool({
         if (created.title !== input.title || (created.body ?? "") !== input.body) {
           throw new Error("The created pull request metadata no longer matches the approved request");
         }
-        await assertMatchingCommit(created.head.sha);
+        await assertMatchingCommit(created.head.sha, await liveBaseSha());
         return { ...created, commitSha: created.head.sha };
       } catch (error) {
         if (createdPullNumber) {
@@ -146,9 +146,10 @@ export default defineTool({
             throw new Error("Refusing to recover a pull request with different title or body");
           }
           try {
-            await assertMatchingCommit(recovered.head.sha);
+            await assertMatchingCommit(recovered.head.sha, await liveBaseSha());
           } catch (validationError) {
-            if (validationError instanceof CommitMismatchError) {
+            if (validationError instanceof CommitMismatchError &&
+              await commitBelongsToOperation(recovered.head.sha)) {
               await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
             }
             throw validationError;
@@ -183,6 +184,10 @@ export default defineTool({
     })).digest("hex");
     const commitMessageFor = (baseSha: string) =>
       `${input.commitMessage}\n\nEve-Change-Fingerprint: ${fingerprintFor(baseSha)}`;
+    const liveBaseSha = async () => (await request<{ object: { sha: string } }>(
+      "GET",
+      `${root}/git/ref/heads/${baseBranch.split("/").map(encodeURIComponent).join("/")}`,
+    )).object.sha;
     const buildExpectedTree = async (baseSha: string) => {
       const baseCommit = await request<{ tree: { sha: string } }>(
         "GET", `${root}/git/commits/${baseSha}`,
@@ -234,7 +239,15 @@ export default defineTool({
     };
     const commitMessage = commitMessageFor(baseRef.object.sha);
     const tree = await buildExpectedTree(baseRef.object.sha);
-    const assertMatchingCommit = async (sha: string) => {
+    const commitBelongsToOperation = async (sha: string) => {
+      const candidate = await request<{ message: string; parents: Array<{ sha: string }> }>(
+        "GET", `${root}/git/commits/${sha}`,
+      );
+      const candidateBase = candidate.parents[0]?.sha;
+      return candidate.parents.length === 1 && !!candidateBase &&
+        candidate.message === commitMessageFor(candidateBase);
+    };
+    const assertMatchingCommit = async (sha: string, currentBaseSha = baseRef.object.sha) => {
       const candidate = await request<{
         message: string;
         parents: Array<{ sha: string }>;
@@ -242,9 +255,9 @@ export default defineTool({
       }>("GET", `${root}/git/commits/${sha}`);
       const candidateBase = candidate.parents[0]?.sha;
       const expectedTree = candidateBase ? await buildExpectedTree(candidateBase) : null;
-      const ancestry = candidateBase && candidateBase !== baseRef.object.sha
+      const ancestry = candidateBase && candidateBase !== currentBaseSha
         ? await request<{ status: string }>(
-            "GET", `${root}/compare/${encodeURIComponent(candidateBase)}...${encodeURIComponent(baseRef.object.sha)}`,
+            "GET", `${root}/compare/${encodeURIComponent(candidateBase)}...${encodeURIComponent(currentBaseSha)}`,
           )
         : { status: "identical" };
       if (
@@ -266,9 +279,10 @@ export default defineTool({
         throw new Error("Refusing to recover a pull request with different title or body");
       }
       try {
-        await assertMatchingCommit(alreadyOpen.head.sha);
+        await assertMatchingCommit(alreadyOpen.head.sha, await liveBaseSha());
       } catch (validationError) {
-        if (validationError instanceof CommitMismatchError) {
+        if (validationError instanceof CommitMismatchError &&
+          await commitBelongsToOperation(alreadyOpen.head.sha)) {
           await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
         }
         throw validationError;
@@ -289,7 +303,7 @@ export default defineTool({
         "GET",
         `${root}/git/ref/heads/${branchPath}`,
       );
-      await assertMatchingCommit(existingRef.object.sha);
+      await assertMatchingCommit(existingRef.object.sha, await liveBaseSha());
       const pull = await createPull(baseBranch, existingRef.object.sha);
       return {
         owner: input.owner,
@@ -324,7 +338,7 @@ export default defineTool({
       } catch {
         throw error;
       }
-      await assertMatchingCommit(concurrent.object.sha);
+      await assertMatchingCommit(concurrent.object.sha, await liveBaseSha());
       commitSha = concurrent.object.sha;
       createdRef = false;
     }

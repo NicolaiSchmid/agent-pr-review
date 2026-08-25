@@ -75,6 +75,7 @@ For v1, a fine-grained PAT is sufficient. Restrict it to `NicolaiSchmid/nunc-imm
 - Pull requests: read and write
 - Issues: read and write
 - Metadata: read
+- Administration: read (used only to verify the authenticated caller's repository role before repository tools run)
 
 The sandbox token should be a different fine-grained token restricted to the same repository with only Contents: read. Never reuse the host token there. Neither GitHub token is included in sandbox environment options: Eve's network policy injects the read-only authorization header at the firewall, and the host mutation token is never brokered.
 
@@ -86,7 +87,7 @@ Configure a GitHub webhook:
 - Event: Pull requests
 - Actions handled: opened, synchronize, reopened, ready for review
 
-A GitHub App is the production recommendation because installation-scoped, short-lived tokens reduce PAT blast radius. Give the App the same repository permissions and subscribe only to pull request events. The current typed client is intentionally token-based v1; swapping token acquisition does not change scope or publication logic.
+A GitHub App is the production recommendation because installation-scoped, short-lived tokens reduce PAT blast radius. Give the App the same repository permissions, including Administration: read for caller authorization, and subscribe only to pull request events. The current typed client is intentionally token-based v1; swapping token acquisition does not change scope or publication logic.
 
 ## Deploy
 
