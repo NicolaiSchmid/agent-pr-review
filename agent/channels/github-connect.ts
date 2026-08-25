@@ -365,7 +365,7 @@ export default githubChannel({
     },
   },
   onComment: (ctx, comment) => {
-    if (!comment.author || comment.author.type === "Bot") return null;
+    if (!comment.author || isAgentBot(comment.author)) return null;
     return {
       auth: defaultGitHubAuth(ctx),
       context: [
@@ -400,7 +400,7 @@ export default githubChannel({
             and t.repository_id = ${String(ctx.repository.id)}
             and c.pull_request_number = ${number}
             and t.kind = 'pr_review'
-            and t.state in ('queued', 'waiting_for_ci', 'reviewing', 'waiting_for_user', 'publishing')
+            and t.state in ('queued', 'waiting_for_ci', 'reviewing', 'waiting_for_user')
         `;
       } else if (response.body.head.sha.toLowerCase() === suite.headSha.toLowerCase()) {
         currentPullRequests.push(number);

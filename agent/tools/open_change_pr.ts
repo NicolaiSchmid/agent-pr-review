@@ -120,8 +120,23 @@ export default defineTool({
         try {
           await claimOperationPull(pull.number);
         } catch (error) {
-          await request("PATCH", `${root}/pulls/${pull.number}`, { state: "closed" });
-          throw error;
+          let binding: number | null;
+          try {
+            const reconciled = await database()<Array<{ pull_request_number: number | null }>>`
+              select pull_request_number from change_operations where id = ${operation.id}::uuid
+            `;
+            binding = reconciled[0]?.pull_request_number ?? null;
+          } catch {
+            throw error;
+          }
+          if (binding === pull.number) {
+            operation.pull_request_number = pull.number;
+          } else {
+            if (binding !== null) {
+              await request("PATCH", `${root}/pulls/${pull.number}`, { state: "closed" });
+            }
+            throw error;
+          }
         }
         const created = await request<{
           number: number;
@@ -156,7 +171,7 @@ export default defineTool({
           }
           throw error;
         }
-        const recovered = await existingPull(baseBranch);
+        const recovered = await existingPull();
         if (recovered) {
           if (!recovered.draft) {
             if (operation.pull_request_number === recovered.number) {
