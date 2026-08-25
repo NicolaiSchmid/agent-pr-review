@@ -159,7 +159,8 @@ export default defineTool({
           throw new CreatedPullInvariantError("The created pull request metadata no longer matches the approved request");
         }
         await assertMatchingCommit(created.head.sha, await liveBaseSha());
-        return { ...created, commitSha: created.head.sha };
+        const validated = await revalidateRecoveredPull(pull.number, created.head.sha);
+        return { ...validated, commitSha: validated.head.sha };
       } catch (error) {
         if (createdPullNumber) {
           const created = await request<{ head: { sha: string }; state: string }>(
