@@ -36,7 +36,7 @@ export default defineTool({
     const { token } = await ctx.getToken(githubAuth);
     await requireRepositoryPermission(ctx, token, input.owner, input.repo, "read");
     const response = await fetch(
-      `https://api.github.com/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}`,
+      `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}`,
       { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
     );
     if (!response.ok) throw new Error(`Could not resolve repository: ${response.status}`);
@@ -44,7 +44,7 @@ export default defineTool({
     const repositoryId = String(repository.id);
     const headSha = input.headSha.toLowerCase();
     const pullResponse = await fetch(
-      `https://api.github.com/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/pulls/${input.pullRequestNumber}`,
+      `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/pulls/${input.pullRequestNumber}`,
       { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
     );
     if (!pullResponse.ok) throw new Error(`Could not resolve pull request: ${pullResponse.status}`);

@@ -68,7 +68,7 @@ export default defineTool({
     }
     class CommitMismatchError extends Error {}
     const request = async <T = Record<string, unknown>>(method: string, path: string, body?: unknown) => {
-      const response = await fetch(`https://api.github.com${path}`, {
+      const response = await fetch(`${env.githubApiUrl.replace(/\/+$/, "")}${path}`, {
         method,
         headers: {
           accept: "application/vnd.github+json",
@@ -109,7 +109,7 @@ export default defineTool({
       try {
         const pull = await request<{ number: number; html_url: string }>("POST", `${root}/pulls`, {
           title: input.title,
-          body: input.body,
+          body: operationBody,
           head: input.branch,
           base: baseBranch,
           draft: true,
@@ -124,7 +124,7 @@ export default defineTool({
           body: string | null;
         }>("GET", `${root}/pulls/${pull.number}`);
         if (!created.draft) throw new Error("The created pull request is no longer a draft");
-        if (created.title !== input.title || (created.body ?? "") !== input.body) {
+        if (created.title !== input.title || (created.body ?? "") !== operationBody) {
           throw new Error("The created pull request metadata no longer matches the approved request");
         }
         await assertMatchingCommit(created.head.sha, await liveBaseSha());
@@ -142,14 +142,14 @@ export default defineTool({
         const recovered = await existingPull(baseBranch);
         if (recovered) {
           if (!recovered.draft) throw new Error("Refusing to recover a pull request that is no longer a draft");
-          if (recovered.title !== input.title || (recovered.body ?? "") !== input.body) {
+          if (recovered.title !== input.title || (recovered.body ?? "") !== operationBody) {
             throw new Error("Refusing to recover a pull request with different title or body");
           }
           try {
             await assertMatchingCommit(recovered.head.sha, await liveBaseSha());
           } catch (validationError) {
             if (validationError instanceof CommitMismatchError &&
-              await commitBelongsToOperation(recovered.head.sha)) {
+              (recovered.body ?? "") === operationBody) {
               await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
             }
             throw validationError;
@@ -171,6 +171,17 @@ export default defineTool({
       "GET",
       `${root}/git/ref/heads/${baseBranch.split("/").map(encodeURIComponent).join("/")}`,
     );
+    const operationFingerprint = createHash("sha256").update(JSON.stringify({
+      owner: input.owner.toLowerCase(),
+      repo: input.repo.toLowerCase(),
+      baseBranch,
+      branch: input.branch,
+      title: input.title,
+      body: input.body,
+      commitMessage: input.commitMessage,
+      files: input.files,
+    })).digest("hex");
+    const operationBody = `${input.body}\n\n<!-- eve-change-operation:${operationFingerprint} -->`;
     const fingerprintFor = (baseSha: string) => createHash("sha256").update(JSON.stringify({
       owner: input.owner.toLowerCase(),
       repo: input.repo.toLowerCase(),
@@ -239,14 +250,6 @@ export default defineTool({
     };
     const commitMessage = commitMessageFor(baseRef.object.sha);
     const tree = await buildExpectedTree(baseRef.object.sha);
-    const commitBelongsToOperation = async (sha: string) => {
-      const candidate = await request<{ message: string; parents: Array<{ sha: string }> }>(
-        "GET", `${root}/git/commits/${sha}`,
-      );
-      const candidateBase = candidate.parents[0]?.sha;
-      return candidate.parents.length === 1 && !!candidateBase &&
-        candidate.message === commitMessageFor(candidateBase);
-    };
     const assertMatchingCommit = async (sha: string, currentBaseSha = baseRef.object.sha) => {
       const candidate = await request<{
         message: string;
@@ -275,14 +278,14 @@ export default defineTool({
     const alreadyOpen = await existingPull(baseBranch);
     if (alreadyOpen) {
       if (!alreadyOpen.draft) throw new Error("Refusing to recover a pull request that is no longer a draft");
-      if (alreadyOpen.title !== input.title || (alreadyOpen.body ?? "") !== input.body) {
+      if (alreadyOpen.title !== input.title || (alreadyOpen.body ?? "") !== operationBody) {
         throw new Error("Refusing to recover a pull request with different title or body");
       }
       try {
         await assertMatchingCommit(alreadyOpen.head.sha, await liveBaseSha());
       } catch (validationError) {
         if (validationError instanceof CommitMismatchError &&
-          await commitBelongsToOperation(alreadyOpen.head.sha)) {
+          (alreadyOpen.body ?? "") === operationBody) {
           await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
         }
         throw validationError;

@@ -6,6 +6,8 @@ describe("task lifecycle", () => {
     expect(canTransitionTask("queued", "waiting_for_ci")).toBe(true);
     expect(transitionTask("queued", "superseded")).toBe("superseded");
     expect(transitionTask("waiting_for_ci", "reviewing")).toBe("reviewing");
+    expect(transitionTask("reviewing", "waiting_for_ci")).toBe("waiting_for_ci");
+    expect(transitionTask("publishing", "waiting_for_ci")).toBe("waiting_for_ci");
     expect(transitionTask("waiting_for_user", "superseded")).toBe("superseded");
     expect(() => transitionTask("completed", "reviewing")).toThrow();
     const conversation = reviewConversationKey({

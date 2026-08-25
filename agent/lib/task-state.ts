@@ -17,9 +17,9 @@ export type TaskState = z.infer<typeof taskStateSchema>;
 const transitions: Record<TaskState, ReadonlySet<TaskState>> = {
   queued: new Set(["waiting_for_ci", "reviewing", "superseded", "cancelled", "failed"]),
   waiting_for_ci: new Set(["reviewing", "superseded", "cancelled", "failed"]),
-  reviewing: new Set(["waiting_for_user", "publishing", "superseded", "cancelled", "failed"]),
+  reviewing: new Set(["waiting_for_ci", "waiting_for_user", "publishing", "superseded", "cancelled", "failed"]),
   waiting_for_user: new Set(["reviewing", "superseded", "cancelled", "failed"]),
-  publishing: new Set(["completed", "superseded", "failed"]),
+  publishing: new Set(["waiting_for_ci", "completed", "superseded", "failed"]),
   completed: new Set(),
   superseded: new Set(),
   failed: new Set(["queued", "cancelled"]),

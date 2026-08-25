@@ -1,5 +1,6 @@
 import type { SessionContext } from "eve/context";
 import { database } from "./database.js";
+import { env } from "./env.js";
 
 type RequiredPermission = "read" | "write";
 
@@ -48,7 +49,7 @@ export const requireRepositoryPermission = async (
     throw new Error("A verified GitHub identity is required for repository access");
   }
   const response = await fetch(
-    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/collaborators/${encodeURIComponent(login)}/permission`,
+    `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/collaborators/${encodeURIComponent(login)}/permission`,
     {
       headers: {
         accept: "application/vnd.github+json",

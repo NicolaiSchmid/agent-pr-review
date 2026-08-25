@@ -44,7 +44,7 @@ export default defineTool({
       }
     })();
     const fetchGitHub = async (requestPath: string, accept = "application/vnd.github+json") => {
-      const response = await fetch(`https://api.github.com${requestPath}`, {
+      const response = await fetch(`${env.githubApiUrl.replace(/\/+$/, "")}${requestPath}`, {
         headers: {
           accept,
           authorization: `Bearer ${token}`,

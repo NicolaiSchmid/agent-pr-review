@@ -17,6 +17,7 @@ interface DeferredCiTask {
   github_installation_id: string | null;
   pull_request_number: number;
   lease_token: string;
+  claimed_from: "waiting_for_ci" | "reviewing" | "publishing";
 }
 
 const release = async (taskId: string, leaseToken: string) => {
@@ -49,7 +50,7 @@ const githubToken = async () => {
 
 const resolveRepository = async (task: DeferredCiTask) => {
   const token = await githubToken();
-  const response = await fetch(`https://api.github.com/repositories/${task.repository_id}`, {
+  const response = await fetch(`${env.githubApiUrl.replace(/\/+$/, "")}/repositories/${task.repository_id}`, {
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" },
   });
   const rateBody = response.status === 403 ? await response.clone().text() : "";
@@ -68,12 +69,13 @@ const resolveRepository = async (task: DeferredCiTask) => {
 const cleanupStaleResult = async (
   task: DeferredCiTask,
   repository: { owner: string; repo: string },
+  reason = "CI result superseded by a newer pull-request head.",
 ) => {
   const token = await githubToken();
   const marker = `<!-- eve-ci-result:${task.id} -->`;
   for (let page = 1; ; page += 1) {
     const response = await fetch(
-      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/issues/${task.pull_request_number}/comments?per_page=100&page=${page}`,
+      `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/issues/${task.pull_request_number}/comments?per_page=100&page=${page}`,
       { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
     );
     if (!response.ok) throw new Error(`Could not find stale CI result: ${response.status}`);
@@ -89,11 +91,11 @@ const cleanupStaleResult = async (
     });
     if (existing) {
       const update = await fetch(
-        `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/issues/comments/${existing.id}`,
+        `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/issues/comments/${existing.id}`,
         {
           method: "PATCH",
           headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "content-type": "application/json", "user-agent": "eve-engineering-agent" },
-          body: JSON.stringify({ body: `CI result superseded by a newer pull-request head.\n\n${marker}` }),
+          body: JSON.stringify({ body: `${reason}\n\n${marker}` }),
         },
       );
       if (!update.ok) throw new Error(`Could not supersede stale CI result: ${update.status}`);
@@ -109,7 +111,7 @@ const currentPullRequestHead = async (
 ) => {
   const token = await githubToken();
   const response = await fetch(
-    `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/pulls/${task.pull_request_number}`,
+    `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/pulls/${task.pull_request_number}`,
     { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
   );
   if (response.status === 404) throw new PermanentTargetError("Pull request is permanently unavailable: 404");
@@ -137,7 +139,7 @@ export default defineSchedule({
       (async () => {
         const tasks = await database()<DeferredCiTask[]>`
           with candidates as (
-            select t.id
+            select t.id, t.state as claimed_from
             from tasks t
             join conversations c on c.id = t.conversation_id
             where (t.state = 'waiting_for_ci' or (t.state in ('reviewing', 'publishing') and t.updated_at < now() - interval '15 minutes'))
@@ -155,7 +157,7 @@ export default defineSchedule({
           from candidates x, conversations c
           where t.id = x.id and t.conversation_id = c.id
             and (t.state = 'waiting_for_ci' or (t.state in ('reviewing', 'publishing') and t.updated_at < now() - interval '15 minutes'))
-          returning t.id, t.head_sha, t.lease_token, c.repository_id,
+          returning t.id, t.head_sha, t.lease_token, x.claimed_from, c.repository_id,
             c.repository_owner, c.repository_name, c.github_installation_id,
             c.pull_request_number
         `;
@@ -164,6 +166,12 @@ export default defineSchedule({
           tasks.map(async (task) => {
             try {
               const repository = await resolveRepository(task);
+              if (task.claimed_from === "publishing") {
+                await cleanupStaleResult(
+                  task, repository,
+                  "CI result publication was interrupted and will be revalidated.",
+                );
+              }
               const pull = await currentPullRequestHead(task, repository);
               if (!pull.open) {
                 await cancel(task.id, task.lease_token);
