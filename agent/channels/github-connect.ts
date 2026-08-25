@@ -2,6 +2,7 @@ import { connectGitHubCredentials } from "@vercel/connect/eve";
 import { defaultGitHubAuth, githubChannel } from "eve/channels/github";
 import { database } from "../lib/database.js";
 import { env } from "../lib/env.js";
+import { z } from "zod";
 
 const credentials = connectGitHubCredentials(env.githubConnector);
 
@@ -10,7 +11,7 @@ const finishCiTask = async (
   pullRequestNumber: number,
   headSha: string,
   state: "completed" | "waiting_for_ci",
-  taskId?: string,
+  taskId: string,
 ) => {
   await database()`
     update tasks t
@@ -22,12 +23,19 @@ const finishCiTask = async (
       and t.state = 'reviewing'
       and t.kind = 'pr_review'
       and c.pull_request_number = ${pullRequestNumber}
-      and (${taskId ?? null}::uuid is null or t.id = ${taskId ?? null}::uuid)
+      and t.id = ${taskId}::uuid
   `;
 };
 
-const ciTaskId = (message: string) =>
-  /(?:^|\n)CI_TASK_ID:\s*([0-9a-f-]{36})\s*$/im.exec(message)?.[1];
+const parseCiOutcome = (message: string) => {
+  const ids = [...message.matchAll(/^CI_TASK_ID:\s*(\S+)\s*$/gim)];
+  const states = [...message.matchAll(/^CI_TASK_STATE:\s*(pending|terminal)\s*$/gim)];
+  if (ids.length !== 1 || states.length !== 1) return null;
+  const final = /(?:^|\n)CI_TASK_ID:\s*(\S+)\s*\nCI_TASK_STATE:\s*(pending|terminal)\s*$/i
+    .exec(message.trim());
+  if (!final || !z.string().uuid().safeParse(final[1]).success) return null;
+  return { taskId: final[1]!, state: final[2]!.toLowerCase() as "pending" | "terminal" };
+};
 
 export default githubChannel({
   botName: env.agentBotName,
@@ -43,16 +51,14 @@ export default githubChannel({
   events: {
     async "message.completed"(data, channel) {
       if (data.finishReason === "tool-calls") return;
-      const match = data.message
-        ? /(?:^|\n)CI_TASK_STATE:\s*(pending|terminal)\s*$/im.exec(data.message.trim())
-        : null;
-      if (channel.state.pullRequestNumber && channel.state.headSha) {
+      const outcome = data.message ? parseCiOutcome(data.message) : null;
+      if (outcome && channel.state.pullRequestNumber && channel.state.headSha) {
         await finishCiTask(
           String(channel.state.repositoryId),
           channel.state.pullRequestNumber,
           channel.state.headSha,
-          match?.[1]?.toLowerCase() === "terminal" ? "completed" : "waiting_for_ci",
-          data.message ? ciTaskId(data.message) : undefined,
+          outcome.state === "terminal" ? "completed" : "waiting_for_ci",
+          outcome.taskId,
         );
       }
       if (!data.message) return;
@@ -60,26 +66,8 @@ export default githubChannel({
         await channel.thread.post(data.message.slice(offset, offset + 60_000));
       }
     },
-    async "turn.failed"(_data, channel) {
-      if (channel.state.pullRequestNumber && channel.state.headSha) {
-        await finishCiTask(
-          String(channel.state.repositoryId),
-          channel.state.pullRequestNumber,
-          channel.state.headSha,
-          "waiting_for_ci",
-        );
-      }
-    },
     async "session.failed"(data, channel) {
-      if (channel.state.pullRequestNumber && channel.state.headSha) {
-        await finishCiTask(
-          String(channel.state.repositoryId),
-          channel.state.pullRequestNumber,
-          channel.state.headSha,
-          "waiting_for_ci",
-        );
-      }
-      await channel.thread.post(`CI continuation failed and was deferred for retry. Error: ${data.code}`);
+      await channel.thread.post(`This session failed and can be retried. Error: ${data.code}`);
     },
   },
   onComment: (ctx, comment) => {
@@ -99,15 +87,26 @@ export default githubChannel({
     ) {
       return null;
     }
+    const currentPullRequests: number[] = [];
+    for (const number of suite.pullRequests) {
+      const response = await ctx.github.request<{ head: { sha: string } }>({
+        method: "GET",
+        path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/pulls/${number}`,
+      });
+      if (response.body.head.sha.toLowerCase() === suite.headSha.toLowerCase()) {
+        currentPullRequests.push(number);
+      }
+    }
+    if (currentPullRequests.length === 0) return null;
     const claimed = await database()<Array<{ id: string }>>`
       with candidate as (
         select t.id
         from tasks t
         join conversations c on c.id = t.conversation_id
         where t.repository_id = ${String(ctx.repository.id)}
-          and t.head_sha = ${suite.headSha}
+          and t.head_sha = ${suite.headSha.toLowerCase()}
           and t.state = 'waiting_for_ci'
-          and c.pull_request_number = any(${suite.pullRequests})
+          and c.pull_request_number = any(${currentPullRequests})
         order by t.created_at
         for update of t skip locked
         limit 1
@@ -128,5 +127,20 @@ export default githubChannel({
         `Read all Check Runs and legacy commit statuses. End with CI_TASK_ID: ${claimed[0]!.id} and then exactly CI_TASK_STATE: pending or CI_TASK_STATE: terminal on separate lines.`,
       ],
     };
+  },
+  onPullRequest: async (ctx, pullRequest) => {
+    if (!pullRequest.headSha || pullRequest.action !== "synchronize") return null;
+    await database()`
+      update tasks t
+      set state = 'superseded', updated_at = now()
+      from conversations c
+      where t.conversation_id = c.id
+        and t.repository_id = ${String(ctx.repository.id)}
+        and c.pull_request_number = ${pullRequest.pullRequestNumber}
+        and t.kind = 'pr_review'
+        and t.head_sha <> ${pullRequest.headSha.toLowerCase()}
+        and t.state in ('queued', 'waiting_for_ci', 'reviewing', 'waiting_for_user', 'publishing')
+    `;
+    return null;
   },
 });

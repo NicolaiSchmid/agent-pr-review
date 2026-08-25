@@ -1,7 +1,11 @@
 import { defineSchedule } from "eve/schedules";
+import { connectGitHubCredentials } from "@vercel/connect/eve";
 import github from "../channels/github-connect.js";
 import { database } from "../lib/database.js";
 import { extractCompletedAssistantText } from "../lib/message-text.js";
+import { env } from "../lib/env.js";
+
+const credentials = connectGitHubCredentials(env.githubConnector);
 
 interface DeferredCiTask {
   id: string;
@@ -27,6 +31,25 @@ const complete = async (taskId: string) => {
     set state = 'completed', updated_at = now()
     where id = ${taskId} and state = 'reviewing'
   `;
+};
+
+const supersede = async (taskId: string) => {
+  await database()`
+    update tasks set state = 'superseded', updated_at = now()
+    where id = ${taskId} and state = 'reviewing'
+  `;
+};
+
+const currentPullRequestHead = async (task: DeferredCiTask) => {
+  const source = credentials.installationToken;
+  if (!source) throw new Error("GitHub installation token is unavailable");
+  const token = typeof source === "function" ? await source() : source;
+  const response = await fetch(
+    `https://api.github.com/repos/${encodeURIComponent(task.repository_owner)}/${encodeURIComponent(task.repository_name)}/pulls/${task.pull_request_number}`,
+    { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
+  );
+  if (!response.ok) throw new Error(`Could not revalidate PR head: ${response.status}`);
+  return (await response.json() as { head: { sha: string } }).head.sha.toLowerCase();
 };
 
 const reportedTerminalCi = async (
@@ -59,7 +82,7 @@ export default defineSchedule({
             select t.id
             from tasks t
             join conversations c on c.id = t.conversation_id
-            where t.state = 'waiting_for_ci'
+            where (t.state = 'waiting_for_ci' or (t.state = 'reviewing' and t.updated_at < now() - interval '15 minutes'))
               and t.head_sha is not null
               and c.repository_id is not null
               and c.repository_owner is not null
@@ -73,14 +96,19 @@ export default defineSchedule({
           set state = 'reviewing', updated_at = now()
           from candidates x, conversations c
           where t.id = x.id and t.conversation_id = c.id
+            and (t.state = 'waiting_for_ci' or (t.state = 'reviewing' and t.updated_at < now() - interval '15 minutes'))
           returning t.id, t.head_sha, c.repository_id,
             c.repository_owner, c.repository_name, c.github_installation_id,
             c.pull_request_number
         `;
 
-        await Promise.all(
+        await Promise.allSettled(
           tasks.map(async (task) => {
             try {
+              if (await currentPullRequestHead(task) !== task.head_sha.toLowerCase()) {
+                await supersede(task.id);
+                return;
+              }
               const session = await receive(github, {
                 message: [
                   `Re-evaluate deferred CI task ${task.id} for exact head ${task.head_sha}.`,
@@ -107,7 +135,10 @@ export default defineSchedule({
               throw error;
             }
           }),
-        );
+        ).then(async (results) => {
+          const failures = results.filter((result) => result.status === "rejected");
+          if (failures.length) throw new AggregateError(failures.map((result) => result.reason));
+        });
       })(),
     );
   },

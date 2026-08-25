@@ -27,9 +27,10 @@ export default defineTool({
     if (!response.ok) throw new Error(`Could not resolve repository: ${response.status}`);
     const repository = await response.json() as { id: number };
     const repositoryId = String(repository.id);
+    const headSha = input.headSha.toLowerCase();
     const conversationId = randomUUID();
     const taskId = randomUUID();
-    const key = `github:${input.owner.toLowerCase()}/${input.repo.toLowerCase()}#${input.pullRequestNumber}`;
+    const key = `github:${repositoryId}#${input.pullRequestNumber}`;
     const installation = ctx.session.auth.current?.attributes.installation_id;
     const rows = await database()<Array<{ id: string }>>`
       with conversation as (
@@ -51,13 +52,13 @@ export default defineTool({
         returning id
       )
       insert into tasks (id, conversation_id, kind, state, repository_id, head_sha)
-      select ${taskId}, conversation.id, 'pr_review', 'waiting_for_ci', ${repositoryId}, ${input.headSha}
+      select ${taskId}, conversation.id, 'pr_review', 'waiting_for_ci', ${repositoryId}, ${headSha}
       from conversation
       on conflict (conversation_id, head_sha)
         where kind = 'pr_review' and state not in ('completed', 'superseded', 'failed', 'cancelled')
       do update set state = 'waiting_for_ci', updated_at = now()
       returning id
     `;
-    return { taskId: rows[0]!.id, state: "waiting_for_ci", headSha: input.headSha };
+    return { taskId: rows[0]!.id, state: "waiting_for_ci", headSha };
   },
 });
