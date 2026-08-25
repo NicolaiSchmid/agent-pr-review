@@ -21,14 +21,14 @@ const githubLoginFor = async (ctx: SessionContext): Promise<string | null> => {
     return webhookLogin;
   }
   if (auth.principalType !== "user") return null;
-  const identities = await database()<Array<{ provider_user_id: string }>>`
-    select provider_user_id
+  const identities = await database()<Array<{ provider_user_id: string; provider_login: string | null }>>`
+    select provider_user_id, provider_login
     from principal_identities
     where principal_id = ${auth.principalId} and provider = 'github'
     order by verified_at desc
     limit 1
   `;
-  return identities[0]?.provider_user_id ?? null;
+  return identities[0]?.provider_login ?? identities[0]?.provider_user_id ?? null;
 };
 
 export const requireRepositoryPermission = async (
@@ -44,9 +44,23 @@ export const requireRepositoryPermission = async (
     if (typeof target === "string" && target.toLowerCase() === `${owner}/${repo}`.toLowerCase()) return;
     throw new Error("Runtime repository access is outside the claimed task target");
   }
-  const login = await githubLoginFor(ctx);
+  let login = await githubLoginFor(ctx);
   if (!login) {
     throw new Error("A verified GitHub identity is required for repository access");
+  }
+  if (/^\d+$/.test(login)) {
+    const identity = await fetch(`${env.githubApiUrl.replace(/\/+$/, "")}/user/${login}`, {
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${token}`,
+        "user-agent": "eve-engineering-agent",
+        "x-github-api-version": "2022-11-28",
+      },
+    });
+    if (!identity.ok) throw new Error("Could not resolve the verified GitHub account login");
+    const account = await identity.json() as { login?: string };
+    if (!account.login) throw new Error("Verified GitHub account has no login");
+    login = account.login;
   }
   const response = await fetch(
     `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/collaborators/${encodeURIComponent(login)}/permission`,

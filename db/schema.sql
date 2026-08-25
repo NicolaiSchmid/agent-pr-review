@@ -29,6 +29,7 @@ create table if not exists conversations (
 alter table conversations add column if not exists repository_owner text;
 alter table conversations add column if not exists repository_name text;
 alter table conversations add column if not exists github_installation_id bigint;
+alter table principal_identities add column if not exists provider_login text;
 
 create table if not exists tasks (
   id uuid primary key,
