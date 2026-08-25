@@ -48,12 +48,30 @@ const cancel = async (taskId: string, leaseToken: string) => {
   `;
 };
 
-const currentPullRequestHead = async (task: DeferredCiTask) => {
+const githubToken = async () => {
   const source = credentials.installationToken;
   if (!source) throw new Error("GitHub installation token is unavailable");
-  const token = typeof source === "function" ? await source() : source;
+  return typeof source === "function" ? await source() : source;
+};
+
+const resolveRepository = async (task: DeferredCiTask) => {
+  const token = await githubToken();
+  const response = await fetch(`https://api.github.com/repositories/${task.repository_id}`, {
+    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" },
+  });
+  if (!response.ok) throw new Error(`Could not resolve repository identity: ${response.status}`);
+  const repository = await response.json() as { id: number; name: string; owner: { login: string } };
+  if (String(repository.id) !== task.repository_id) throw new Error("Repository identity mismatch");
+  return { owner: repository.owner.login, repo: repository.name };
+};
+
+const currentPullRequestHead = async (
+  task: DeferredCiTask,
+  repository: { owner: string; repo: string },
+) => {
+  const token = await githubToken();
   const response = await fetch(
-    `https://api.github.com/repos/${encodeURIComponent(task.repository_owner)}/${encodeURIComponent(task.repository_name)}/pulls/${task.pull_request_number}`,
+    `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/pulls/${task.pull_request_number}`,
     { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
   );
   if (!response.ok) throw new Error(`Could not revalidate PR head: ${response.status}`);
@@ -127,7 +145,8 @@ export default defineSchedule({
         await Promise.allSettled(
           tasks.map(async (task) => {
             try {
-              const pull = await currentPullRequestHead(task);
+              const repository = await resolveRepository(task);
+              const pull = await currentPullRequestHead(task, repository);
               if (!pull.open) {
                 await cancel(task.id, task.lease_token);
                 return;
@@ -145,8 +164,8 @@ export default defineSchedule({
                   `End with CI_TASK_ID: ${task.id}, CI_LEASE_ID: ${task.lease_token}, and then exactly CI_TASK_STATE: pending or CI_TASK_STATE: terminal on separate lines.`,
                 ].join("\n"),
                 target: {
-                  owner: task.repository_owner,
-                  repo: task.repository_name,
+                  owner: repository.owner,
+                  repo: repository.repo,
                   pullRequestNumber: task.pull_request_number,
                   repositoryId: Number(task.repository_id),
                   ...(task.github_installation_id
@@ -159,7 +178,7 @@ export default defineSchedule({
                     ...appAuth.attributes,
                     ci_task_id: task.id,
                     ci_lease_id: task.lease_token,
-                    repository: `${task.repository_owner}/${task.repository_name}`,
+                    repository: `${repository.owner}/${repository.repo}`,
                   },
                 },
               });

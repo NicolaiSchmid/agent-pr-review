@@ -109,6 +109,10 @@ export default defineTool({
       const content = await readResponseTextLimited(response, 500_000);
       return { operation: input.operation, content };
     }
+    if (input.operation === "tree") {
+      const content = await readResponseTextLimited(response, 300_000);
+      return { operation: input.operation, data: JSON.parse(content) as unknown };
+    }
     return { operation: input.operation, data: await response.json() };
   },
 });

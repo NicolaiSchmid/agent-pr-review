@@ -121,15 +121,6 @@ export default defineTool({
             draft: recovered.draft,
           };
         }
-        if (createdRef && error instanceof GitHubRequestError) {
-          const current = await request<{ object: { sha: string } }>(
-            "GET",
-            `${root}/git/ref/heads/${branchPath}`,
-          );
-          if (current.object.sha === commitSha) {
-            await request("DELETE", `${root}/git/refs/heads/${branchPath}`);
-          }
-        }
         throw error;
       }
     };
