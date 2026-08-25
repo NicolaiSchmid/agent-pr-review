@@ -167,6 +167,21 @@ export default githubChannel({
     ],
   },
   events: {
+    async "turn.failed"(_data, channel, ctx) {
+      const claim = trustedCiClaim(ctx);
+      if (!claim || !channel.state.pullRequestNumber || !channel.state.headSha) return;
+      const repositoryId = String(channel.state.repositoryId);
+      const releasedReview = await transitionCiTask(
+        repositoryId, channel.state.pullRequestNumber, channel.state.headSha,
+        "reviewing", "waiting_for_ci", claim.taskId, claim.leaseToken,
+      );
+      if (!releasedReview) {
+        await transitionCiTask(
+          repositoryId, channel.state.pullRequestNumber, channel.state.headSha,
+          "publishing", "waiting_for_ci", claim.taskId, claim.leaseToken,
+        );
+      }
+    },
     async "message.completed"(data, channel, ctx) {
       if (data.finishReason === "tool-calls") return;
       const outcome = data.message ? parseCiOutcome(data.message) : null;

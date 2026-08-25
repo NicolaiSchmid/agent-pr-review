@@ -68,6 +68,7 @@ export default defineTool({
       }
     }
     class CommitMismatchError extends Error {}
+    class CreatedPullInvariantError extends Error {}
     const request = async <T = Record<string, unknown>>(method: string, path: string, body?: unknown) => {
       const response = await fetch(`${env.githubApiUrl.replace(/\/+$/, "")}${path}`, {
         method,
@@ -129,10 +130,18 @@ export default defineTool({
           draft: boolean;
           title: string;
           body: string | null;
+          state: string;
+          base: { ref: string };
         }>("GET", `${root}/pulls/${pull.number}`);
-        if (!created.draft) throw new Error("The created pull request is no longer a draft");
+        if (created.state !== "open") {
+          throw new CreatedPullInvariantError("The created pull request is no longer open");
+        }
+        if (!created.draft) throw new CreatedPullInvariantError("The created pull request is no longer a draft");
+        if (created.base.ref !== baseBranch) {
+          throw new CreatedPullInvariantError("The created pull request no longer targets the approved base");
+        }
         if (created.title !== input.title || (created.body ?? "") !== operationBody) {
-          throw new Error("The created pull request metadata no longer matches the approved request");
+          throw new CreatedPullInvariantError("The created pull request metadata no longer matches the approved request");
         }
         await assertMatchingCommit(created.head.sha, await liveBaseSha());
         return { ...created, commitSha: created.head.sha };
@@ -141,7 +150,8 @@ export default defineTool({
           const created = await request<{ head: { sha: string }; state: string }>(
             "GET", `${root}/pulls/${createdPullNumber}`,
           );
-          if (created.state === "open") {
+          if (created.state === "open" &&
+            (error instanceof CreatedPullInvariantError || error instanceof CommitMismatchError)) {
             await request("PATCH", `${root}/pulls/${createdPullNumber}`, { state: "closed" });
           }
           throw error;
