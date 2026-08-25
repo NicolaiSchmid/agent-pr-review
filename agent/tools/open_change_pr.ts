@@ -137,7 +137,12 @@ export default defineTool({
           if (recovered.title !== input.title || (recovered.body ?? "") !== input.body) {
             throw new Error("Refusing to recover a pull request with different title or body");
           }
-          await assertMatchingCommit(recovered.head.sha);
+          try {
+            await assertMatchingCommit(recovered.head.sha);
+          } catch (validationError) {
+            await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
+            throw validationError;
+          }
           return {
             number: recovered.number,
             html_url: recovered.html_url,
@@ -250,7 +255,12 @@ export default defineTool({
       if (alreadyOpen.title !== input.title || (alreadyOpen.body ?? "") !== input.body) {
         throw new Error("Refusing to recover a pull request with different title or body");
       }
-      await assertMatchingCommit(alreadyOpen.head.sha);
+      try {
+        await assertMatchingCommit(alreadyOpen.head.sha);
+      } catch (validationError) {
+        await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
+        throw validationError;
+      }
       return {
         owner: input.owner,
         repo: input.repo,

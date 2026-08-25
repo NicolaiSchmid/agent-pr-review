@@ -11,7 +11,7 @@ const transitionCiTask = async (
   pullRequestNumber: number,
   headSha: string,
   from: "reviewing" | "publishing",
-  state: "completed" | "publishing" | "waiting_for_ci",
+  state: "completed" | "publishing" | "superseded" | "waiting_for_ci",
   taskId: string,
   leaseToken: string,
 ) => {
@@ -112,8 +112,31 @@ export default githubChannel({
       const claim = trustedCiClaim(ctx);
       if (!claim) {
         if (!data.message) return;
-        for (let offset = 0; offset < data.message.length; offset += 60_000) {
-          await channel.thread.post(data.message.slice(offset, offset + 60_000));
+        const marker = `<!-- eve-reply:${ctx.session.id}:${ctx.session.turn.id} -->`;
+        const truncated = data.message.length + marker.length + 2 > 60_000;
+        const suffix = `${truncated ? "\n\n_Output truncated to fit one GitHub comment._" : ""}\n\n${marker}`;
+        const body = `${data.message.slice(0, 60_000 - suffix.length)}${suffix}`;
+        if (channel.thread.kind === "review_thread") {
+          await channel.thread.post(body);
+          return;
+        }
+        let existingCommentId: number | undefined;
+        for (let page = 1; !existingCommentId; page += 1) {
+          const comments = await channel.github.request<Array<{ id: number; body?: string }>>({
+            method: "GET",
+            path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/${channel.state.issueNumber}/comments?per_page=100&page=${page}`,
+          });
+          existingCommentId = comments.body.find((comment) => comment.body?.includes(marker))?.id;
+          if (comments.body.length < 100) break;
+        }
+        if (existingCommentId) {
+          await channel.github.request({
+            method: "PATCH",
+            path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${existingCommentId}`,
+            body: { body },
+          });
+        } else {
+          await channel.thread.post(body);
         }
         return;
       }
@@ -183,6 +206,11 @@ export default githubChannel({
             path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${publishedCommentId}`,
             body: { body: `CI result superseded before publication completed.\n\n${marker}` },
           });
+          await transitionCiTask(
+            String(channel.state.repositoryId), channel.state.pullRequestNumber,
+            channel.state.headSha, "publishing", "superseded",
+            claim.taskId, claim.leaseToken,
+          );
         }
       } catch (error) {
         await transitionCiTask(
@@ -288,7 +316,7 @@ export default githubChannel({
         and c.pull_request_number = ${pullRequest.pullRequestNumber}
         and t.kind = 'pr_review'
         and t.head_sha <> ${pullRequest.headSha.toLowerCase()}
-        and t.state in ('queued', 'waiting_for_ci', 'reviewing', 'waiting_for_user', 'publishing')
+        and t.state in ('queued', 'waiting_for_ci', 'reviewing', 'waiting_for_user')
     `;
     return null;
   },

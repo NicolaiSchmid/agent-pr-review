@@ -61,13 +61,45 @@ const resolveRepository = async (task: DeferredCiTask) => {
   const response = await fetch(`https://api.github.com/repositories/${task.repository_id}`, {
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" },
   });
-  if (response.status === 403 || response.status === 404) {
+  const rateLimited = response.status === 429 || response.headers.get("retry-after") !== null ||
+    response.headers.get("x-ratelimit-remaining") === "0";
+  if ((response.status === 403 && !rateLimited) || response.status === 404) {
     throw new PermanentTargetError(`Repository is permanently unavailable: ${response.status}`);
   }
   if (!response.ok) throw new Error(`Could not resolve repository identity: ${response.status}`);
   const repository = await response.json() as { id: number; name: string; owner: { login: string } };
   if (String(repository.id) !== task.repository_id) throw new Error("Repository identity mismatch");
   return { owner: repository.owner.login, repo: repository.name };
+};
+
+const cleanupStaleResult = async (
+  task: DeferredCiTask,
+  repository: { owner: string; repo: string },
+) => {
+  const token = await githubToken();
+  const marker = `<!-- eve-ci-result:${task.id} -->`;
+  for (let page = 1; ; page += 1) {
+    const response = await fetch(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/issues/${task.pull_request_number}/comments?per_page=100&page=${page}`,
+      { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
+    );
+    if (!response.ok) throw new Error(`Could not find stale CI result: ${response.status}`);
+    const comments = await response.json() as Array<{ id: number; body?: string }>;
+    const existing = comments.find((comment) => comment.body?.includes(marker));
+    if (existing) {
+      const update = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/issues/comments/${existing.id}`,
+        {
+          method: "PATCH",
+          headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "content-type": "application/json", "user-agent": "eve-engineering-agent" },
+          body: JSON.stringify({ body: `CI result superseded by a newer pull-request head.\n\n${marker}` }),
+        },
+      );
+      if (!update.ok) throw new Error(`Could not supersede stale CI result: ${update.status}`);
+      return;
+    }
+    if (comments.length < 100) return;
+  }
 };
 
 const currentPullRequestHead = async (
@@ -158,6 +190,7 @@ export default defineSchedule({
                 return;
               }
               if (pull.headSha !== task.head_sha.toLowerCase()) {
+                await cleanupStaleResult(task, repository);
                 await supersede(task.id, task.lease_token);
                 return;
               }
