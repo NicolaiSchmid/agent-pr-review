@@ -83,7 +83,8 @@ export default defineTool({
       `${root}/pulls?state=open&head=${encodeURIComponent(`${input.owner}:${input.branch}`)}${baseBranch ? `&base=${encodeURIComponent(baseBranch)}` : ""}`,
     );
     const existingPull = async (baseBranch?: string) => (await listPulls(baseBranch))[0];
-    const createPull = async (baseBranch: string, commitSha: string, createdRef: boolean) => {
+    const createPull = async (baseBranch: string, commitSha: string) => {
+      let createdPullNumber: number | undefined;
       try {
         const pull = await request<{ number: number; html_url: string }>("POST", `${root}/pulls`, {
           title: input.title,
@@ -92,6 +93,7 @@ export default defineTool({
           base: baseBranch,
           draft: true,
         });
+        createdPullNumber = pull.number;
         const created = await request<{
           number: number;
           html_url: string;
@@ -107,6 +109,15 @@ export default defineTool({
         await assertMatchingCommit(created.head.sha);
         return { ...created, commitSha: created.head.sha };
       } catch (error) {
+        if (createdPullNumber) {
+          const created = await request<{ head: { sha: string }; state: string }>(
+            "GET", `${root}/pulls/${createdPullNumber}`,
+          );
+          if (created.state === "open" && created.head.sha !== commitSha) {
+            await request("PATCH", `${root}/pulls/${createdPullNumber}`, { state: "closed" });
+            throw error;
+          }
+        }
         const recovered = await existingPull(baseBranch);
         if (recovered) {
           if (!recovered.draft) throw new Error("Refusing to recover a pull request that is no longer a draft");
@@ -244,7 +255,7 @@ export default defineTool({
         `${root}/git/ref/heads/${branchPath}`,
       );
       await assertMatchingCommit(existingRef.object.sha);
-      const pull = await createPull(baseBranch, existingRef.object.sha, false);
+      const pull = await createPull(baseBranch, existingRef.object.sha);
       return {
         owner: input.owner,
         repo: input.repo,
@@ -279,7 +290,7 @@ export default defineTool({
       commitSha = concurrent.object.sha;
       createdRef = false;
     }
-    const pull = await createPull(baseBranch, commitSha, createdRef);
+    const pull = await createPull(baseBranch, commitSha);
     return {
       owner: input.owner,
       repo: input.repo,

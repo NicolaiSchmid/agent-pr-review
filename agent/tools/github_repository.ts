@@ -103,7 +103,9 @@ export default defineTool({
         state: status.state ?? "unknown",
       }));
       const pending = [
-        ...normalizedChecks.filter((check) => check.status !== "completed"),
+        ...normalizedChecks.filter(
+          (check) => check.status !== "completed" || check.conclusion === null,
+        ),
         ...normalizedStatuses.filter((status) => status.state === "pending"),
       ];
       const failed = [

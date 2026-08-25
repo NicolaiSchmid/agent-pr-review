@@ -144,9 +144,28 @@ export default githubChannel({
       );
       if (!claimed) return;
       try {
-        for (let offset = 0; offset < data.message.length; offset += 60_000) {
-          if (!await canPublishCiTask(channel, claim.taskId, claim.leaseToken)) return;
-          await channel.thread.post(data.message.slice(offset, offset + 60_000));
+        if (!await canPublishCiTask(channel, claim.taskId, claim.leaseToken)) return;
+        const marker = `<!-- eve-ci-result:${claim.taskId} -->`;
+        const suffix = `\n\n${marker}`;
+        const body = `${data.message.slice(0, 60_000 - suffix.length)}${suffix}`;
+        let existingCommentId: number | undefined;
+        for (let page = 1; page <= 10 && !existingCommentId; page += 1) {
+          const comments = await channel.github.request<Array<{ id: number; body?: string }>>({
+            method: "GET",
+            path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/${channel.state.pullRequestNumber}/comments?per_page=100&page=${page}`,
+          });
+          existingCommentId = comments.body.find((comment) => comment.body?.includes(marker))?.id;
+          if (comments.body.length < 100) break;
+        }
+        if (!await canPublishCiTask(channel, claim.taskId, claim.leaseToken)) return;
+        if (existingCommentId) {
+          await channel.github.request({
+            method: "PATCH",
+            path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${existingCommentId}`,
+            body: { body },
+          });
+        } else {
+          await channel.thread.post(body);
         }
         await transitionCiTask(
           String(channel.state.repositoryId), channel.state.pullRequestNumber,
