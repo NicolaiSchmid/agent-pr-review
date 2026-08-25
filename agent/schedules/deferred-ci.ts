@@ -135,6 +135,7 @@ export default defineSchedule({
               const session = await receive(github, {
                 message: [
                   `Re-evaluate deferred CI task ${task.id} for exact head ${task.head_sha}.`,
+                  "This task is already durable: do not call defer_ci again.",
                   "Read both Check Runs and legacy commit statuses with github_repository.",
                   "If any required context is pending, report that it remains deferred. Otherwise report the terminal CI outcome and continue the requested work.",
                   `End with CI_TASK_ID: ${task.id}, CI_LEASE_ID: ${task.lease_token}, and then exactly CI_TASK_STATE: pending or CI_TASK_STATE: terminal on separate lines.`,

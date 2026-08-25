@@ -104,11 +104,26 @@ export default githubChannel({
     }
     const currentPullRequests: number[] = [];
     for (const number of suite.pullRequests) {
-      const response = await ctx.github.request<{ head: { sha: string } }>({
+      const response = await ctx.github.request<{
+        head: { sha: string };
+        merged: boolean;
+        state: string;
+      }>({
         method: "GET",
         path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/pulls/${number}`,
       });
-      if (response.body.head.sha.toLowerCase() === suite.headSha.toLowerCase()) {
+      if (response.body.state !== "open" || response.body.merged) {
+        await database()`
+          update tasks t
+          set state = 'cancelled', updated_at = now()
+          from conversations c
+          where t.conversation_id = c.id
+            and t.repository_id = ${String(ctx.repository.id)}
+            and c.pull_request_number = ${number}
+            and t.kind = 'pr_review'
+            and t.state in ('queued', 'waiting_for_ci', 'reviewing', 'waiting_for_user', 'publishing')
+        `;
+      } else if (response.body.head.sha.toLowerCase() === suite.headSha.toLowerCase()) {
         currentPullRequests.push(number);
       }
     }
