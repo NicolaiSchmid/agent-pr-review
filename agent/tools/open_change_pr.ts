@@ -116,10 +116,12 @@ export default defineTool({
           draft: true,
         });
         createdPullNumber = pull.number;
-        await database()`
-          update change_operations set pull_request_number = ${pull.number}, updated_at = now()
-          where id = ${operation.id}::uuid and pull_request_number is null
-        `;
+        try {
+          await claimOperationPull(pull.number);
+        } catch (error) {
+          await request("PATCH", `${root}/pulls/${pull.number}`, { state: "closed" });
+          throw error;
+        }
         const created = await request<{
           number: number;
           html_url: string;
