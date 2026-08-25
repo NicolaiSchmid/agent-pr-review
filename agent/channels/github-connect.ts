@@ -201,7 +201,18 @@ export default githubChannel({
         );
         return;
       }
-      if (outcome.state !== "terminal" || !await hostCiTerminal(channel, channel.state.headSha)) {
+      let initiallyTerminal = false;
+      try {
+        initiallyTerminal = await hostCiTerminal(channel, channel.state.headSha);
+      } catch (error) {
+        await transitionCiTask(
+          String(channel.state.repositoryId), channel.state.pullRequestNumber,
+          channel.state.headSha, "reviewing", "waiting_for_ci",
+          claim.taskId, claim.leaseToken,
+        ).catch(() => undefined);
+        throw error;
+      }
+      if (outcome.state !== "terminal" || !initiallyTerminal) {
         await transitionCiTask(
           String(channel.state.repositoryId), channel.state.pullRequestNumber,
           channel.state.headSha, "reviewing", "waiting_for_ci",
@@ -214,6 +225,30 @@ export default githubChannel({
         channel.state.headSha, "reviewing", "publishing", claim.taskId, claim.leaseToken,
       );
       if (!claimed) return;
+      const marker = `<!-- eve-ci-result:${claim.taskId} -->`;
+      const compensatePublishedComment = async (reason: string) => {
+        for (let page = 1; page <= 30; page += 1) {
+          const comments = await channel.github.request<Array<{
+            id: number; body?: string; user?: { login?: string; type?: string };
+          }>>({
+            method: "GET",
+            path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/${channel.state.pullRequestNumber}/comments?per_page=100&page=${page}`,
+          });
+          const published = comments.body.find(
+            (comment) => isAgentBot(comment.user) && comment.body?.includes(marker),
+          );
+          if (published) {
+            await channel.github.request({
+              method: "PATCH",
+              path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${published.id}`,
+              body: { body: `${reason}\n\n${marker}` },
+            });
+            return;
+          }
+          if (comments.body.length < 100) return;
+        }
+        throw new Error("CI result comment search exceeded pagination bound");
+      };
       try {
         if (
           !await canPublishCiTask(channel, claim.taskId, claim.leaseToken) ||
@@ -226,7 +261,6 @@ export default githubChannel({
           );
           return;
         }
-        const marker = `<!-- eve-ci-result:${claim.taskId} -->`;
         const truncated = data.message.length + marker.length + 2 > 60_000;
         const suffix = `${truncated ? "\n\n_Output truncated to fit one GitHub comment._" : ""}\n\n${marker}`;
         const body = `${data.message.slice(0, 60_000 - suffix.length)}${suffix}`;
@@ -254,16 +288,14 @@ export default githubChannel({
           );
           return;
         }
-        let publishedCommentId: number;
         if (existingCommentId) {
           await channel.github.request({
             method: "PATCH",
             path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${existingCommentId}`,
             body: { body },
           });
-          publishedCommentId = existingCommentId;
         } else {
-          publishedCommentId = (await channel.thread.post(body)).id;
+          await channel.thread.post(body);
         }
         const stillCurrent = await canPublishCiTask(channel, claim.taskId, claim.leaseToken);
         const stillTerminal = await hostCiTerminal(channel, channel.state.headSha);
@@ -274,11 +306,9 @@ export default githubChannel({
           claim.taskId, claim.leaseToken,
         );
         if (!completed) {
-          await channel.github.request({
-            method: "PATCH",
-            path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${publishedCommentId}`,
-            body: { body: `${stillCurrent && !stillTerminal ? "CI returned to a pending state" : "CI result superseded"} before publication completed.\n\n${marker}` },
-          });
+          await compensatePublishedComment(
+            `${stillCurrent && !stillTerminal ? "CI returned to a pending state" : "CI result superseded"} before publication completed.`,
+          );
           await transitionCiTask(
             String(channel.state.repositoryId), channel.state.pullRequestNumber,
             channel.state.headSha, "publishing", stillCurrent ? "waiting_for_ci" : "superseded",
@@ -286,6 +316,9 @@ export default githubChannel({
           );
         }
       } catch (error) {
+        await compensatePublishedComment(
+          "CI result could not be revalidated after publication; it will be retried.",
+        ).catch(() => undefined);
         await transitionCiTask(
           String(channel.state.repositoryId), channel.state.pullRequestNumber,
           channel.state.headSha, "publishing", "waiting_for_ci",
