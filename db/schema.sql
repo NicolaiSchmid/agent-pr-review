@@ -95,6 +95,17 @@ create table if not exists approval_requests (
   created_at timestamptz not null default now()
 );
 
+create table if not exists change_operations (
+  id uuid primary key default gen_random_uuid(),
+  request_fingerprint text not null unique,
+  repository_owner text not null,
+  repository_name text not null,
+  branch text not null,
+  pull_request_number integer,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists audit_events (
   id bigserial primary key,
   task_id uuid references tasks(id),

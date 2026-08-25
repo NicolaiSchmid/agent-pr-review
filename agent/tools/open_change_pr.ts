@@ -3,6 +3,7 @@ import { connect } from "@vercel/connect/eve";
 import { defineTool } from "eve/tools";
 import { always } from "eve/tools/approval";
 import { z } from "zod";
+import { database } from "../lib/database.js";
 import { env } from "../lib/env.js";
 import { requireRepositoryPermission } from "../lib/repository-authorization.js";
 
@@ -115,6 +116,10 @@ export default defineTool({
           draft: true,
         });
         createdPullNumber = pull.number;
+        await database()`
+          update change_operations set pull_request_number = ${pull.number}, updated_at = now()
+          where id = ${operation.id}::uuid and pull_request_number is null
+        `;
         const created = await request<{
           number: number;
           html_url: string;
@@ -145,11 +150,11 @@ export default defineTool({
           if (recovered.title !== input.title || (recovered.body ?? "") !== operationBody) {
             throw new Error("Refusing to recover a pull request with different title or body");
           }
+          await claimOperationPull(recovered.number);
           try {
             await assertMatchingCommit(recovered.head.sha, await liveBaseSha());
           } catch (validationError) {
-            if (validationError instanceof CommitMismatchError &&
-              (recovered.body ?? "") === operationBody) {
+            if (validationError instanceof CommitMismatchError && operationOwnsPull(recovered)) {
               await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
             }
             throw validationError;
@@ -181,7 +186,30 @@ export default defineTool({
       commitMessage: input.commitMessage,
       files: input.files,
     })).digest("hex");
-    const operationBody = `${input.body}\n\n<!-- eve-change-operation:${operationFingerprint} -->`;
+    const operations = await database()<Array<{ id: string; pull_request_number: number | null }>>`
+      insert into change_operations (
+        request_fingerprint, repository_owner, repository_name, branch
+      ) values (
+        ${operationFingerprint}, ${input.owner.toLowerCase()}, ${input.repo.toLowerCase()}, ${input.branch}
+      )
+      on conflict (request_fingerprint) do update set updated_at = change_operations.updated_at
+      returning id, pull_request_number
+    `;
+    const operation = operations[0]!;
+    const operationBody = `${input.body}\n\n<!-- eve-change-operation:${operation.id} -->`;
+    const operationOwnsPull = (pull: { number: number; body: string | null }) =>
+      (pull.body ?? "") === operationBody &&
+      (operation.pull_request_number === null || operation.pull_request_number === pull.number);
+    const claimOperationPull = async (number: number) => {
+      const claimed = await database()<Array<{ id: string }>>`
+        update change_operations set pull_request_number = ${number}, updated_at = now()
+        where id = ${operation.id}::uuid
+          and (pull_request_number is null or pull_request_number = ${number})
+        returning id
+      `;
+      if (claimed.length !== 1) throw new Error("Change operation is already bound to another pull request");
+      operation.pull_request_number = number;
+    };
     const fingerprintFor = (baseSha: string) => createHash("sha256").update(JSON.stringify({
       owner: input.owner.toLowerCase(),
       repo: input.repo.toLowerCase(),
@@ -281,11 +309,11 @@ export default defineTool({
       if (alreadyOpen.title !== input.title || (alreadyOpen.body ?? "") !== operationBody) {
         throw new Error("Refusing to recover a pull request with different title or body");
       }
+      await claimOperationPull(alreadyOpen.number);
       try {
         await assertMatchingCommit(alreadyOpen.head.sha, await liveBaseSha());
       } catch (validationError) {
-        if (validationError instanceof CommitMismatchError &&
-          (alreadyOpen.body ?? "") === operationBody) {
+        if (validationError instanceof CommitMismatchError && operationOwnsPull(alreadyOpen)) {
           await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
         }
         throw validationError;

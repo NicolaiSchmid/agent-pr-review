@@ -39,6 +39,23 @@ const transitionCiTask = async (
   return rows.length === 1;
 };
 
+const completedCiTask = async (
+  repositoryId: string,
+  pullRequestNumber: number,
+  headSha: string,
+  taskId: string,
+  leaseToken: string,
+) => {
+  const rows = await database()<Array<{ id: string }>>`
+    select t.id from tasks t
+    join conversations c on c.id = t.conversation_id
+    where t.id = ${taskId}::uuid and t.lease_token = ${leaseToken}::uuid
+      and t.state = 'completed' and t.repository_id = ${repositoryId}
+      and t.head_sha = ${headSha} and c.pull_request_number = ${pullRequestNumber}
+  `;
+  return rows.length === 1;
+};
+
 const trustedCiClaim = (ctx: { session: { auth: { initiator: { attributes: Readonly<Record<string, string | readonly string[]>> } | null } } }) => {
   const attributes = ctx.session.auth.initiator?.attributes;
   const taskId = attributes?.ci_task_id;
@@ -315,6 +332,10 @@ export default githubChannel({
           );
         }
       } catch (error) {
+        if (await completedCiTask(
+          String(channel.state.repositoryId), channel.state.pullRequestNumber,
+          channel.state.headSha, claim.taskId, claim.leaseToken,
+        )) return;
         await compensatePublishedComment(
           "CI result could not be revalidated after publication; it will be retried.",
         ).catch(() => undefined);
