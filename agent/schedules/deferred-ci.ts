@@ -7,6 +7,8 @@ import { env } from "../lib/env.js";
 
 const credentials = connectGitHubCredentials(env.githubConnector);
 
+class PermanentTargetError extends Error {}
+
 interface DeferredCiTask {
   id: string;
   head_sha: string;
@@ -59,6 +61,9 @@ const resolveRepository = async (task: DeferredCiTask) => {
   const response = await fetch(`https://api.github.com/repositories/${task.repository_id}`, {
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" },
   });
+  if (response.status === 403 || response.status === 404) {
+    throw new PermanentTargetError(`Repository is permanently unavailable: ${response.status}`);
+  }
   if (!response.ok) throw new Error(`Could not resolve repository identity: ${response.status}`);
   const repository = await response.json() as { id: number; name: string; owner: { login: string } };
   if (String(repository.id) !== task.repository_id) throw new Error("Repository identity mismatch");
@@ -74,6 +79,7 @@ const currentPullRequestHead = async (
     `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/pulls/${task.pull_request_number}`,
     { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
   );
+  if (response.status === 404) throw new PermanentTargetError("Pull request is permanently unavailable: 404");
   if (!response.ok) throw new Error(`Could not revalidate PR head: ${response.status}`);
   const pull = await response.json() as {
     head: { sha: string };
@@ -188,7 +194,11 @@ export default defineSchedule({
               if (terminal) await complete(task.id, task.lease_token);
               else await release(task.id, task.lease_token);
             } catch (error) {
-              await release(task.id, task.lease_token).catch(() => undefined);
+              if (error instanceof PermanentTargetError) {
+                await cancel(task.id, task.lease_token).catch(() => undefined);
+              } else {
+                await release(task.id, task.lease_token).catch(() => undefined);
+              }
               throw error;
             }
           }),

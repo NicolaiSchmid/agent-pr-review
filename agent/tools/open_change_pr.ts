@@ -11,6 +11,18 @@ const githubAuth = connect({
   principalType: "app",
 });
 
+const isValidBranch = (branch: string) => {
+  if (
+    branch.endsWith("/") || branch.endsWith(".") || branch.includes("..") ||
+    branch.includes("@{") || branch.includes("//") || branch === "@"
+  ) return false;
+  return branch.split("/").every((component) =>
+    component.length > 0 && !component.startsWith(".") &&
+    !component.endsWith(".lock") &&
+    !/[\u0000-\u0020\u007f~^:?*\[\\]/.test(component),
+  );
+};
+
 const inputSchema = z.object({
   owner: z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/),
   repo: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/),
@@ -31,6 +43,7 @@ export default defineTool({
   inputSchema,
   approval: always(),
   async execute(input, ctx) {
+    if (!isValidBranch(input.branch)) throw new Error("Branch is not a valid Git ref name");
     if (new Set(input.files.map((file) => file.path)).size !== input.files.length) {
       throw new Error("Duplicate file paths are not allowed");
     }
@@ -283,9 +296,12 @@ export default defineTool({
       });
     } catch (error) {
       if (!(error instanceof GitHubRequestError) || error.status !== 422) throw error;
-      const concurrent = await request<{ object: { sha: string } }>(
-        "GET", `${root}/git/ref/heads/${branchPath}`,
-      );
+      let concurrent: { object: { sha: string } };
+      try {
+        concurrent = await request("GET", `${root}/git/ref/heads/${branchPath}`);
+      } catch {
+        throw error;
+      }
       await assertMatchingCommit(concurrent.object.sha);
       commitSha = concurrent.object.sha;
       createdRef = false;

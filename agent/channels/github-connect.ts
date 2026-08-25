@@ -146,10 +146,11 @@ export default githubChannel({
       try {
         if (!await canPublishCiTask(channel, claim.taskId, claim.leaseToken)) return;
         const marker = `<!-- eve-ci-result:${claim.taskId} -->`;
-        const suffix = `\n\n${marker}`;
+        const truncated = data.message.length + marker.length + 2 > 60_000;
+        const suffix = `${truncated ? "\n\n_Output truncated to fit one GitHub comment._" : ""}\n\n${marker}`;
         const body = `${data.message.slice(0, 60_000 - suffix.length)}${suffix}`;
         let existingCommentId: number | undefined;
-        for (let page = 1; page <= 10 && !existingCommentId; page += 1) {
+        for (let page = 1; !existingCommentId; page += 1) {
           const comments = await channel.github.request<Array<{ id: number; body?: string }>>({
             method: "GET",
             path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/${channel.state.pullRequestNumber}/comments?per_page=100&page=${page}`,
@@ -158,21 +159,31 @@ export default githubChannel({
           if (comments.body.length < 100) break;
         }
         if (!await canPublishCiTask(channel, claim.taskId, claim.leaseToken)) return;
+        let publishedCommentId: number;
         if (existingCommentId) {
           await channel.github.request({
             method: "PATCH",
             path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${existingCommentId}`,
             body: { body },
           });
+          publishedCommentId = existingCommentId;
         } else {
-          await channel.thread.post(body);
+          publishedCommentId = (await channel.thread.post(body)).id;
         }
-        await transitionCiTask(
+        const stillCurrent = await canPublishCiTask(channel, claim.taskId, claim.leaseToken);
+        const completed = stillCurrent && await transitionCiTask(
           String(channel.state.repositoryId), channel.state.pullRequestNumber,
           channel.state.headSha, "publishing",
           "completed",
           claim.taskId, claim.leaseToken,
         );
+        if (!completed) {
+          await channel.github.request({
+            method: "PATCH",
+            path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${publishedCommentId}`,
+            body: { body: `CI result superseded before publication completed.\n\n${marker}` },
+          });
+        }
       } catch (error) {
         await transitionCiTask(
           String(channel.state.repositoryId), channel.state.pullRequestNumber,
