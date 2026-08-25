@@ -140,76 +140,82 @@ export default defineTool({
       "GET",
       `${root}/git/ref/heads/${baseBranch.split("/").map(encodeURIComponent).join("/")}`,
     );
-    const fingerprint = createHash("sha256").update(JSON.stringify({
+    const fingerprintFor = (baseSha: string) => createHash("sha256").update(JSON.stringify({
       owner: input.owner.toLowerCase(),
       repo: input.repo.toLowerCase(),
       baseBranch,
-      baseSha: baseRef.object.sha,
+      baseSha,
       branch: input.branch,
       title: input.title,
       body: input.body,
       commitMessage: input.commitMessage,
       files: input.files,
     })).digest("hex");
-    const commitMessage = `${input.commitMessage}\n\nEve-Change-Fingerprint: ${fingerprint}`;
-    const baseCommit = await request<{ tree: { sha: string } }>(
-      "GET",
-      `${root}/git/commits/${baseRef.object.sha}`,
-    );
-    const baseTree = await request<{
-      truncated: boolean;
-      tree: Array<{ path: string; mode: string; type: string }>;
-    }>("GET", `${root}/git/trees/${baseCommit.tree.sha}?recursive=1`);
-    if (baseTree.truncated) {
-      throw new Error("GitHub returned a truncated base tree; refusing to guess file modes");
-    }
-    const entries = new Map(baseTree.tree.map((entry) => [entry.path, entry]));
-    for (const file of input.files) {
-      const existing = entries.get(file.path);
-      if (existing && existing.type !== "blob") {
-        throw new Error(`Replacement path ${file.path} is an existing ${existing.type}`);
+    const commitMessageFor = (baseSha: string) =>
+      `${input.commitMessage}\n\nEve-Change-Fingerprint: ${fingerprintFor(baseSha)}`;
+    const buildExpectedTree = async (baseSha: string) => {
+      const baseCommit = await request<{ tree: { sha: string } }>(
+        "GET", `${root}/git/commits/${baseSha}`,
+      );
+      const baseTree = await request<{
+        truncated: boolean;
+        tree: Array<{ path: string; mode: string; type: string }>;
+      }>("GET", `${root}/git/trees/${baseCommit.tree.sha}?recursive=1`);
+      if (baseTree.truncated) {
+        throw new Error("GitHub returned a truncated base tree; refusing to guess file modes");
       }
-      const segments = file.path.split("/");
-      for (let index = 1; index < segments.length; index += 1) {
-        const ancestor = entries.get(segments.slice(0, index).join("/"));
-        if (ancestor && ancestor.type !== "tree") {
-          throw new Error(`Replacement path ${file.path} descends from an existing ${ancestor.type}`);
+      const entries = new Map(baseTree.tree.map((entry) => [entry.path, entry]));
+      for (const file of input.files) {
+        const existing = entries.get(file.path);
+        if (existing && existing.type !== "blob") {
+          throw new Error(`Replacement path ${file.path} is an existing ${existing.type}`);
+        }
+        const segments = file.path.split("/");
+        for (let index = 1; index < segments.length; index += 1) {
+          const ancestor = entries.get(segments.slice(0, index).join("/"));
+          if (ancestor && ancestor.type !== "tree") {
+            throw new Error(`Replacement path ${file.path} descends from an existing ${ancestor.type}`);
+          }
+        }
+        if (input.files.some(
+          (candidate) => candidate.path !== file.path &&
+            (candidate.path.startsWith(`${file.path}/`) || file.path.startsWith(`${candidate.path}/`)),
+        )) {
+          throw new Error("Replacement paths cannot be ancestors or descendants of each other");
         }
       }
-      if (input.files.some(
-        (candidate) => candidate.path !== file.path &&
-          (candidate.path.startsWith(`${file.path}/`) || file.path.startsWith(`${candidate.path}/`)),
-      )) {
-        throw new Error("Replacement paths cannot be ancestors or descendants of each other");
+      const treeEntries = [];
+      for (const file of input.files) {
+        const blob = await request<{ sha: string }>("POST", `${root}/git/blobs`, {
+          content: file.content,
+          encoding: "utf-8",
+        });
+        treeEntries.push({
+          path: file.path,
+          mode: entries.get(file.path)?.mode ?? "100644",
+          type: "blob",
+          sha: blob.sha,
+        });
       }
-    }
-    const treeEntries = [];
-    for (const file of input.files) {
-      const blob = await request<{ sha: string }>("POST", `${root}/git/blobs`, {
-        content: file.content,
-        encoding: "utf-8",
+      return await request<{ sha: string }>("POST", `${root}/git/trees`, {
+        base_tree: baseCommit.tree.sha,
+        tree: treeEntries,
       });
-      treeEntries.push({
-        path: file.path,
-        mode: entries.get(file.path)?.mode ?? "100644",
-        type: "blob",
-        sha: blob.sha,
-      });
-    }
-    const tree = await request<{ sha: string }>("POST", `${root}/git/trees`, {
-      base_tree: baseCommit.tree.sha,
-      tree: treeEntries,
-    });
+    };
+    const commitMessage = commitMessageFor(baseRef.object.sha);
+    const tree = await buildExpectedTree(baseRef.object.sha);
     const assertMatchingCommit = async (sha: string) => {
       const candidate = await request<{
         message: string;
         parents: Array<{ sha: string }>;
         tree: { sha: string };
       }>("GET", `${root}/git/commits/${sha}`);
+      const candidateBase = candidate.parents[0]?.sha;
+      const expectedTree = candidateBase ? await buildExpectedTree(candidateBase) : null;
       if (
-        candidate.message !== commitMessage ||
-        candidate.parents[0]?.sha !== baseRef.object.sha ||
-        candidate.tree.sha !== tree.sha
+        !candidateBase ||
+        candidate.message !== commitMessageFor(candidateBase) ||
+        candidate.tree.sha !== expectedTree?.sha
       ) {
         throw new Error(
           `Branch ${input.branch} already exists but does not match this approved change`,
@@ -259,20 +265,32 @@ export default defineTool({
       tree: tree.sha,
       parents: [baseRef.object.sha],
     });
-    await request("POST", `${root}/git/refs`, {
-      ref: `refs/heads/${input.branch}`,
-      sha: commit.sha,
-    });
-    const pull = await createPull(baseBranch, commit.sha, true);
+    let commitSha = commit.sha;
+    let createdRef = true;
+    try {
+      await request("POST", `${root}/git/refs`, {
+        ref: `refs/heads/${input.branch}`,
+        sha: commit.sha,
+      });
+    } catch (error) {
+      if (!(error instanceof GitHubRequestError) || error.status !== 422) throw error;
+      const concurrent = await request<{ object: { sha: string } }>(
+        "GET", `${root}/git/ref/heads/${branchPath}`,
+      );
+      await assertMatchingCommit(concurrent.object.sha);
+      commitSha = concurrent.object.sha;
+      createdRef = false;
+    }
+    const pull = await createPull(baseBranch, commitSha, createdRef);
     return {
       owner: input.owner,
       repo: input.repo,
       number: pull.number,
       url: pull.html_url,
       branch: input.branch,
-      commitSha: commit.sha,
+      commitSha: pull.commitSha,
       draft: pull.draft,
-      recovered: false,
+      recovered: !createdRef,
     };
   },
 });

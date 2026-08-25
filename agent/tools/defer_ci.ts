@@ -24,6 +24,15 @@ export default defineTool({
     if (ctx.session.auth.current.attributes.conversation_kind !== "pull_request") {
       throw new Error("CI deferral must be requested from the PR timeline; proactive inline review-thread continuation is not supported");
     }
+    const authenticatedRepository = ctx.session.auth.current.attributes.repository;
+    const authenticatedPullRequest = Number(ctx.session.auth.current.attributes.pull_request_number);
+    if (
+      typeof authenticatedRepository !== "string" ||
+      authenticatedRepository.toLowerCase() !== `${input.owner}/${input.repo}`.toLowerCase() ||
+      authenticatedPullRequest !== input.pullRequestNumber
+    ) {
+      throw new Error("CI deferral target must match the authenticated pull request conversation");
+    }
     const { token } = await ctx.getToken(githubAuth);
     await requireRepositoryPermission(ctx, token, input.owner, input.repo, "read");
     const response = await fetch(
@@ -34,6 +43,15 @@ export default defineTool({
     const repository = await response.json() as { id: number };
     const repositoryId = String(repository.id);
     const headSha = input.headSha.toLowerCase();
+    const pullResponse = await fetch(
+      `https://api.github.com/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/pulls/${input.pullRequestNumber}`,
+      { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
+    );
+    if (!pullResponse.ok) throw new Error(`Could not resolve pull request: ${pullResponse.status}`);
+    const pull = await pullResponse.json() as { head: { sha: string }; state: string };
+    if (pull.state !== "open" || pull.head.sha.toLowerCase() !== headSha) {
+      throw new Error("CI deferral head must match the current open pull request head");
+    }
     const conversationId = randomUUID();
     const taskId = randomUUID();
     const key = `github:${repositoryId}#${input.pullRequestNumber}`;

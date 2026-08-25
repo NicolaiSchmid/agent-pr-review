@@ -124,7 +124,22 @@ export default githubChannel({
       }
     },
     async "session.failed"(data, channel) {
-      await channel.thread.post(`This session failed and can be retried. Error: ${data.code}`);
+      if (!channel.state.pullRequestNumber || !channel.state.headSha) return;
+      const released = await database()<Array<{ id: string }>>`
+        update tasks t
+        set state = 'waiting_for_ci', updated_at = now()
+        from conversations c
+        where t.conversation_id = c.id
+          and t.repository_id = ${String(channel.state.repositoryId)}
+          and t.head_sha = ${channel.state.headSha}
+          and t.kind = 'pr_review'
+          and t.state in ('reviewing', 'publishing')
+          and c.pull_request_number = ${channel.state.pullRequestNumber}
+        returning t.id
+      `;
+      if (released.length === 0) {
+        await channel.thread.post(`This session failed and can be retried. Error: ${data.code}`);
+      }
     },
   },
   onComment: (ctx, comment) => {
