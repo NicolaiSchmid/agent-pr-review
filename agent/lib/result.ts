@@ -27,7 +27,7 @@ export const reviewResultSchema = z.object({
       path: z.string().min(1),
       content: z.string(),
     }),
-  ),
+  ).default([]),
 });
 
 export type ReviewResult = z.infer<typeof reviewResultSchema>;

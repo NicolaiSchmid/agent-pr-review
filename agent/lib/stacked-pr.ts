@@ -31,7 +31,9 @@ const validateChanges = (result: ReviewResult) => {
     seen.add(change.path);
     bytes += Buffer.byteLength(change.content);
   }
-  if (bytes > 500_000) throw new Error("Review changes exceed the 500 KB safety limit");
+  if (bytes > env.maxReviewChangeBytes) {
+    throw new Error(`Review changes exceed the ${env.maxReviewChangeBytes}-byte safety limit`);
+  }
 };
 
 const existingPullForBranch = async (
@@ -39,6 +41,19 @@ const existingPullForBranch = async (
   scope: ReviewScope,
   branch: string,
 ) => (await client.listPullsByHead(scope, branch))[0] ?? null;
+
+const headMatches = async (client: GitHubClient, scope: ReviewScope) =>
+  (await client.getPull(scope)).head.sha === scope.headSha;
+
+const deleteOwnedRef = async (
+  client: GitHubClient,
+  scope: ReviewScope,
+  branch: string,
+  expectedSha: string,
+) => {
+  const current = await client.getRef(scope, branch);
+  if (current?.object.sha === expectedSha) await client.deleteRef(scope, branch);
+};
 
 export const createStackedReviewPull = async (
   client: GitHubClient,
@@ -71,8 +86,12 @@ export const createStackedReviewPull = async (
   ).slice(0, Math.max(0, env.maxFindings));
   if (findings.length === 0) return { status: "skipped", reason: "no_valid_findings" } as const;
   const findingPaths = new Set(findings.map((finding) => finding.path));
-  if (result.changes.some((change) => !findingPaths.has(change.path))) {
-    throw new Error("Every review change must correspond to a validated finding path");
+  const changePaths = new Set(result.changes.map((change) => change.path));
+  if (
+    result.changes.some((change) => !findingPaths.has(change.path)) ||
+    findings.some((finding) => !changePaths.has(finding.path))
+  ) {
+    throw new Error("Validated finding paths and review change paths must match");
   }
   const parent = parseStackMarker(pull.body);
   const root = parent?.root ?? scope.number;
@@ -87,24 +106,32 @@ export const createStackedReviewPull = async (
 
   let ref = await client.getRef(scope, branch);
   if (!ref) {
-    const modes = new Map(
-      sourceTree.tree
-        .filter((entry) => entry.type === "blob")
-        .map((entry) => [entry.path, entry.mode]),
-    );
+    const entries = new Map(sourceTree.tree.map((entry) => [entry.path, entry]));
+    for (const change of result.changes) {
+      const entry = entries.get(change.path);
+      if (entry && entry.type !== "blob") {
+        throw new Error(`Review changes cannot replace ${entry.type} entry: ${change.path}`);
+      }
+    }
     const blobs = await Promise.all(
       result.changes.map(async (change) => ({
         path: change.path,
         sha: (await client.createBlob(scope, change.content)).sha,
-        mode: modes.get(change.path),
+        mode: entries.get(change.path)?.mode,
       })),
     );
     const tree = await client.createTree(scope, sourceTree.sha, blobs);
+    if (tree.sha === sourceTree.sha) {
+      return { status: "skipped", reason: "no_changes" } as const;
+    }
     const commit = await client.createCommit(scope, {
       message: `Address Eve review round ${round}`,
       tree: tree.sha,
       parent: scope.headSha,
     });
+    if (!(await headMatches(client, scope))) {
+      return { status: "skipped", reason: "stale_head" } as const;
+    }
     try {
       ref = await client.createRef(scope, branch, commit.sha);
     } catch (error) {
@@ -112,6 +139,11 @@ export const createStackedReviewPull = async (
       ref = await client.getRef(scope, branch);
       if (!ref) throw error;
     }
+  }
+
+  if (!(await headMatches(client, scope))) {
+    await deleteOwnedRef(client, scope, branch, ref.object.sha);
+    return { status: "skipped", reason: "stale_head" } as const;
   }
 
   const recovered = await existingPullForBranch(client, scope, branch);
@@ -130,11 +162,23 @@ export const createStackedReviewPull = async (
       ? result.tests.map((test) => `- ${test.result.toUpperCase()} \`${test.command}\`${test.details ? ` — ${test.details}` : ""}`)
       : ["- None reported"]),
   ].join("\n");
-  const created = await client.createPull(scope, {
-    title: `[Eve review ${round}/${env.maxReviewRounds}] ${findings[0]!.title}`,
-    head: branch,
-    base: scope.headRef,
-    body,
-  });
+  let created: PullRequest;
+  try {
+    created = await client.createPull(scope, {
+      title: `[Eve review ${round}/${env.maxReviewRounds}] ${findings[0]!.title}`,
+      head: branch,
+      base: scope.headRef,
+      body,
+    });
+  } catch (error) {
+    const recoveredPull = await existingPullForBranch(client, scope, branch);
+    if (!recoveredPull) throw error;
+    created = recoveredPull;
+  }
+  if (!(await headMatches(client, scope))) {
+    await client.closePull(scope, created.number);
+    await deleteOwnedRef(client, scope, branch, ref.object.sha);
+    return { status: "skipped", reason: "stale_head" } as const;
+  }
   return { status: "created", pull: created, round } as const;
 };

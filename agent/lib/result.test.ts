@@ -20,4 +20,12 @@ describe("parseReviewResult", () => {
       "valid review result",
     );
   });
+
+  it("defaults omitted changes to an empty array so reviews still publish", () => {
+    const { changes: _changes, ...withoutChanges } = valid;
+    expect(parseReviewResult(JSON.stringify(withoutChanges))).toEqual({
+      ...withoutChanges,
+      changes: [],
+    });
+  });
 });

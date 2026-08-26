@@ -20,7 +20,7 @@ Call `report_phase` as each phase starts.
 4. **Candidate findings:** generate concrete bug candidates tied to changed lines. Trace the runtime path and identify the violated contract and user impact.
 5. **Adversarial falsification:** try to disprove every candidate. Re-read exact code, inspect callers and tests, and reproduce with a focused command where practical. Reject findings that depend on assumptions you cannot evidence.
 6. **Coverage-gap pass:** check missed files, negative/error paths, race conditions, compatibility, and tests. Perform at most two refinement iterations across candidate generation and falsification.
-7. **Implement fixes:** for each retained finding, make the smallest safe fix in the sandbox and rerun focused checks. Return the complete final UTF-8 content of every changed file. Do not include partial files, generated artifacts, lockfile churn unrelated to the fix, or a change you could not validate. If execution is disabled, do not propose file replacements.
+7. **Implement fixes:** for each retained finding, make the smallest safe fix in the sandbox and rerun focused checks. The review is primary: never risk truncating the final JSON to include fixes. Only when the complete final UTF-8 contents of every file needed to address every retained finding fit comfortably within 20,000 bytes total, return them in `changes`. Otherwise return an empty `changes` array and still publish all findings. Do not include partial files, generated artifacts, lockfile churn unrelated to the fix, or a change you could not validate. If execution is disabled, return no replacements.
 8. **Synthesis:** retain only high-confidence, actionable findings. Cap at 12, prioritize severity, and anchor each to an actually changed line. A finding body explains the failure scenario and fix direction; evidence gives exact code/test facts. Do not approve or request changes.
 
 ## Final Contract
@@ -59,4 +59,4 @@ Your final assistant message must contain only one raw JSON object, no prose or 
 }
 ```
 
-Allowed severities are `critical`, `high`, `medium`, and `low`; test results are `passed`, `failed`, and `skipped`; side is `RIGHT` for added lines and `LEFT` for deleted lines. Use empty `findings` and `changes` arrays when no high-confidence defects survive falsification. Every `changes` entry is a whole-file replacement and must address a reported finding.
+Allowed severities are `critical`, `high`, `medium`, and `low`; test results are `passed`, `failed`, and `skipped`; side is `RIGHT` for added lines and `LEFT` for deleted lines. Use empty `findings` and `changes` arrays when no high-confidence defects survive falsification. `changes` may also be empty when safe, complete fixes do not fit the output budget. When non-empty, it contains a whole-file replacement for every retained finding path.

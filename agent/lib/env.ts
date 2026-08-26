@@ -14,6 +14,7 @@ export const env = {
   allowForkExecution: read("ALLOW_FORK_EXECUTION") === "true",
   maxFindings: Number(read("MAX_FINDINGS") ?? "12"),
   maxReviewRounds: Number(read("MAX_REVIEW_ROUNDS") ?? "3"),
+  maxReviewChangeBytes: Number(read("MAX_REVIEW_CHANGE_BYTES") ?? "20000"),
 };
 
 export const requireEnv = (name: keyof typeof env): string => {

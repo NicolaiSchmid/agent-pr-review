@@ -209,6 +209,13 @@ export class GitHubClient {
     );
   }
 
+  deleteRef(scope: Pick<ReviewScope, "owner" | "repo">, ref: string) {
+    return this.request<void>(
+      "DELETE",
+      `/repos/${scope.owner}/${scope.repo}/git/refs/heads/${encodeURIComponent(ref)}`,
+    );
+  }
+
   listPullsByHead(
     scope: Pick<ReviewScope, "owner" | "repo">,
     branch: string,
@@ -227,6 +234,14 @@ export class GitHubClient {
       "POST",
       `/repos/${scope.owner}/${scope.repo}/pulls`,
       { ...input, draft: false },
+    );
+  }
+
+  closePull(scope: Pick<ReviewScope, "owner" | "repo">, number: number) {
+    return this.request<PullRequest>(
+      "PATCH",
+      `/repos/${scope.owner}/${scope.repo}/pulls/${number}`,
+      { state: "closed" },
     );
   }
 
@@ -301,7 +316,7 @@ export class GitHubClient {
     return this.request<{
       sha: string;
       truncated: boolean;
-      tree: Array<{ path: string; type: "blob" | "tree"; mode: string; size?: number }>;
+      tree: Array<{ path: string; type: "blob" | "tree" | "commit"; mode: string; size?: number }>;
     }>(
       "GET",
       `/repos/${scope.owner}/${scope.repo}/git/trees/${ref}?recursive=1`,
