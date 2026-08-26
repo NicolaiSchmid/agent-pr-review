@@ -45,7 +45,7 @@ For v1, a fine-grained PAT is sufficient. Restrict it to `NicolaiSchmid/nunc-imm
 - Issues: read and write
 - Metadata: read
 
-The sandbox token should be a different fine-grained token restricted to the same repository with only Contents: read. Never reuse the host token there. Neither GitHub token is included in sandbox environment options: Eve's network policy injects the read-only authorization header at the firewall, and the host mutation token is never brokered. Set `GITHUB_BOT_LOGIN` to the authenticated App/PAT login so bot-authored stacked PR webhooks can be recognized without admitting unrelated bot PRs. `MAX_REVIEW_ROUNDS` defaults to `3`; `MAX_REVIEW_CHANGE_BYTES` defaults to `20000` so escaped fix payloads leave ample room in the final response budget. Both stack limits are validated as positive safe integers at startup.
+The sandbox token should be a different fine-grained token restricted to the same repository with only Contents: read. Never reuse the host token there. Neither GitHub token is included in sandbox environment options: Eve's network policy injects the read-only authorization header at the firewall, and the host mutation token is never brokered. `GITHUB_BOT_LOGIN` is required before stacked mutation and must match the authenticated App/PAT login so bot-authored stacked PR webhooks can be recognized without admitting unrelated bot PRs. If it is absent, the primary review still publishes but no dead-end fix PR is created. `MAX_REVIEW_ROUNDS` defaults to `3`; `MAX_REVIEW_CHANGE_BYTES` defaults to `20000` so escaped fix payloads leave ample room in the final response budget. Both stack limits are validated as positive safe integers at startup.
 
 Configure a GitHub webhook:
 

@@ -32,13 +32,17 @@ class StackGitHub {
   getAuthenticatedLogin = vi.fn(async () => "eve-bot");
   listPullFiles = vi.fn(async () => [{ filename: "src/a.ts", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-old\n+broken" }]);
   listReviewComments = vi.fn(async () => []);
-  getTree = vi.fn(async () => ({ sha: "source-tree", truncated: false, tree: [{ path: "src/a.ts", type: "blob", mode: "100755" }] }));
+  getTree = vi.fn(async (_scope: ReviewScope, _revision: "base" | "head") => ({ sha: "source-tree", truncated: false, tree: [{ path: "src/a.ts", type: "blob", mode: "100755" }] }));
   listPullsByHead = vi.fn(async () => this.pulls);
   getRef = vi.fn(async () => this.ref);
   createBlob = vi.fn(async () => ({ sha: "blob" }));
   createTree = vi.fn(async () => ({ sha: "tree" }));
   createCommit = vi.fn(async () => ({ sha: "commit" }));
-  getCommit = vi.fn(async () => ({ sha: "commit", tree: { sha: "tree" }, parents: [{ sha: scope.headSha }] }));
+  getCommit = vi.fn(async (_scope: ReviewScope, sha: string) => ({
+    sha,
+    tree: { sha: "tree" },
+    parents: [{ sha: sha === scope.headSha ? scope.baseSha : scope.headSha }],
+  }));
   createRef = vi.fn(async () => {
     this.ref = { ref: "ref", object: { sha: "commit", type: "commit" } };
     if (this.changeHeadAfterRef) this.headSha = "d".repeat(40);
@@ -88,6 +92,18 @@ describe("stacked review pull requests", () => {
     await expect(createStackedReviewPull(client as unknown as GitHubClient, scope, result)).rejects.toThrow("mode 120000");
   });
 
+  it("restores a deleted regular file with its base-tree mode", async () => {
+    const client = new StackGitHub();
+    client.listPullFiles.mockResolvedValue([{ filename: "src/a.ts", status: "removed", additions: 0, deletions: 1, patch: "@@ -1 +0,0 @@\n-broken" }]);
+    client.getTree.mockImplementation(async (_scope: ReviewScope, revision: "base" | "head") =>
+      revision === "head"
+        ? { sha: "source-tree", truncated: false, tree: [] }
+        : { sha: "base-tree", truncated: false, tree: [{ path: "src/a.ts", type: "blob" as const, mode: "100755" }] },
+    );
+    await createStackedReviewPull(client as unknown as GitHubClient, { ...scope, baseSha: scope.baseSha }, { ...result, findings: [{ ...result.findings[0]!, side: "LEFT" }] });
+    expect(client.createTree).toHaveBeenCalledWith(scope, "source-tree", [{ path: "src/a.ts", sha: "blob", mode: "100755" }]);
+  });
+
   it("does not stack closed pulls or trust contributor-supplied markers", async () => {
     const closed = new StackGitHub();
     closed.getPull.mockResolvedValue(pull({ state: "closed" }));
@@ -128,6 +144,13 @@ describe("stacked review pull requests", () => {
     });
     expect(client.closePull).toHaveBeenCalledWith(scope, 8);
     expect(client.deleteRef).toHaveBeenCalledWith(scope, branch);
+  });
+
+  it("deletes its branch when pull creation fails without recovery", async () => {
+    const client = new StackGitHub();
+    client.createPull.mockRejectedValue(new Error("permission denied"));
+    await expect(createStackedReviewPull(client as unknown as GitHubClient, scope, result)).rejects.toThrow("permission denied");
+    expect(client.deleteRef).toHaveBeenCalledWith(scope, expect.stringContaining("eve/review-7-round-1"));
   });
 
   it("skips no-op trees and compensates head changes", async () => {

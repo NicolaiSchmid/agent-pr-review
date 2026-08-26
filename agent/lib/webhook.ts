@@ -97,6 +97,13 @@ export const evaluatePullRequestEvent = (
         login.toLowerCase().endsWith("[bot]") ||
         (env.githubBotLogin && login.toLowerCase() === env.githubBotLogin),
     );
+  if (
+    isBot &&
+    event.pull_request.body?.includes("<!-- eve-review-stack:") &&
+    !env.githubBotLogin
+  ) {
+    return { accepted: false, reason: "bot_login_required" };
+  }
   if (isBot && !isOwnStackedPull(event.pull_request, env.githubBotLogin)) {
     return { accepted: false, reason: "bot_ignored" };
   }

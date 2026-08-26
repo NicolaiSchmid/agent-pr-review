@@ -81,4 +81,16 @@ describe("pull request event filtering", () => {
     expect(isOwnStackedPull({ ...marked, body: "ordinary PR" }, "eve[bot]")).toBe(false);
   });
 
+  it("reports missing bot configuration for marked stacked webhooks", () => {
+    const event = payload({ sender: { login: "eve[bot]", type: "Bot" } });
+    event.pull_request.user = { login: "eve[bot]", type: "Bot" };
+    Object.assign(event.pull_request, {
+      body: "<!-- eve-review-stack:root=7;round=1;parent=7 -->",
+    });
+    expect(evaluatePullRequestEvent(event, "d")).toEqual({
+      accepted: false,
+      reason: "bot_login_required",
+    });
+  });
+
 });

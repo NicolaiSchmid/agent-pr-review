@@ -19,7 +19,7 @@ import {
   scopeFromContext,
   type ReviewScope,
 } from "../lib/scope.js";
-import { env } from "../lib/env.js";
+import { env, requireEnv } from "../lib/env.js";
 import {
   evaluatePullRequestEvent,
   verifyWebhookSignature,
@@ -73,7 +73,11 @@ export default defineChannel({
         request.headers.get("x-github-delivery"),
       );
       if (!decision.accepted) {
-        const status = decision.reason.startsWith("malformed") || decision.reason.startsWith("missing") ? 400 : 202;
+        const status = decision.reason === "bot_login_required"
+          ? 503
+          : decision.reason.startsWith("malformed") || decision.reason.startsWith("missing")
+            ? 400
+            : 202;
         return Response.json(decision, { status });
       }
 
@@ -185,6 +189,7 @@ export default defineChannel({
           reason: "stack_failed",
         };
         try {
+          requireEnv("githubBotLogin");
           stacked = await createStackedReviewPull(client, scope, result);
         } catch (stackError) {
           console.error("stacked review PR creation failed; publishing review without fixes", {

@@ -47,16 +47,18 @@ const headMatches = async (client: GitHubClient, scope: ReviewScope) => {
   return pull.state === "open" && pull.head.sha === scope.headSha;
 };
 
-const verifiedStackParent = (
+const verifiedStackParent = async (
+  client: GitHubClient,
   pull: PullRequest,
   login: string,
   scope: ReviewScope,
 ) => {
   const marker = parseStackMarker(pull.body);
-  if (!marker) return null;
-  const expectedBranch = `eve/review-${marker.root}-round-${marker.round}-${pull.base.sha.slice(0, 7)}`;
-  return pull.user.login.toLowerCase() === login &&
-    pull.head.repo?.full_name.toLowerCase() ===
+  if (!marker || pull.user.login.toLowerCase() !== login) return null;
+  const commit = await client.getCommit(scope, pull.head.sha);
+  if (commit.parents.length !== 1) return null;
+  const expectedBranch = `eve/review-${marker.root}-round-${marker.round}-${commit.parents[0]!.sha.slice(0, 7)}`;
+  return pull.head.repo?.full_name.toLowerCase() ===
       `${scope.owner}/${scope.repo}`.toLowerCase() &&
     pull.head.ref === expectedBranch
     ? marker
@@ -150,12 +152,15 @@ export const createStackedReviewPull = async (
     return { status: "skipped", reason: "incomplete_pull_files" } as const;
   }
   const login = await client.getAuthenticatedLogin();
-  const [files, comments, sourceTree] = await Promise.all([
+  const [files, comments, sourceTree, baseTree] = await Promise.all([
     client.listPullFiles(scope, pull.changed_files),
     client.listReviewComments(scope),
     client.getTree(scope, "head"),
+    client.getTree(scope, "base"),
   ]);
-  if (sourceTree.truncated) throw new Error("Reviewed source tree is truncated");
+  if (sourceTree.truncated || baseTree.truncated) {
+    throw new Error("Reviewed source tree is truncated");
+  }
   const findings = validateAndDedupeFindings(
     scope.headSha,
     result.findings,
@@ -171,7 +176,7 @@ export const createStackedReviewPull = async (
   ) {
     throw new Error("Validated finding paths and review change paths must match");
   }
-  const parent = verifiedStackParent(pull, login, scope);
+  const parent = await verifiedStackParent(client, pull, login, scope);
   const root = parent?.root ?? scope.number;
   const round = (parent?.round ?? 0) + 1;
   if (round > env.maxReviewRounds) {
@@ -181,8 +186,19 @@ export const createStackedReviewPull = async (
   const branch = `eve/review-${root}-round-${round}-${scope.headSha.slice(0, 7)}`;
   const marker = stackMarker(root, round, scope.number);
   const entries = new Map(sourceTree.tree.map((entry) => [entry.path, entry]));
+  const baseEntries = new Map(baseTree.tree.map((entry) => [entry.path, entry]));
+  const fileStatuses = new Map(files.map((file) => [file.filename, file.status]));
+  const modes = new Map<string, string>();
   for (const change of result.changes) {
-    const entry = entries.get(change.path);
+    const headEntry = entries.get(change.path);
+    const entry =
+      headEntry ??
+      (fileStatuses.get(change.path) === "removed"
+        ? baseEntries.get(change.path)
+        : undefined);
+    if (!entry && fileStatuses.get(change.path) !== "added") {
+      throw new Error(`Review change path is missing from the expected tree: ${change.path}`);
+    }
     if (
       entry &&
       (entry.type !== "blob" || !["100644", "100755"].includes(entry.mode))
@@ -191,12 +207,13 @@ export const createStackedReviewPull = async (
         `Review changes cannot replace ${entry.type} entry with mode ${entry.mode}: ${change.path}`,
       );
     }
+    modes.set(change.path, entry?.mode ?? "100644");
   }
   const blobs = await Promise.all(
     result.changes.map(async (change) => ({
       path: change.path,
       sha: (await client.createBlob(scope, change.content)).sha,
-      mode: entries.get(change.path)?.mode,
+      mode: modes.get(change.path),
     })),
   );
   const tree = await client.createTree(scope, sourceTree.sha, blobs);
@@ -264,7 +281,10 @@ export const createStackedReviewPull = async (
     });
   } catch (error) {
     const recoveredPull = await existingPullForBranch(client, scope, branch);
-    if (!recoveredPull) throw error;
+    if (!recoveredPull) {
+      await deleteOwnedRef(client, scope, branch, ref.object.sha);
+      throw error;
+    }
     created = recoveredPull;
   }
   if (!(await headMatches(client, scope))) {
