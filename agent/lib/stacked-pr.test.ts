@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { GitHubClient, PullRequest } from "./github.js";
 import type { ReviewResult } from "./result.js";
 import type { ReviewScope } from "./scope.js";
-import { createStackedReviewPull, parseStackMarker, stackMarker } from "./stacked-pr.js";
+import { compensateStackedReviewPull, createStackedReviewPull, parseStackMarker, stackMarker } from "./stacked-pr.js";
 
 const scope: ReviewScope = {
   owner: "NicolaiSchmid", repo: "nunc-immo", number: 7,
@@ -16,7 +16,8 @@ const result: ReviewResult = {
 };
 const pull = (overrides: Partial<PullRequest> = {}): PullRequest => ({
   number: 7, changed_files: 1, draft: false, html_url: "https://example.test/7",
-  title: "Feature", body: null, base: { sha: scope.baseSha, ref: "main" },
+  title: "Feature", body: null, state: "open", user: { login: "eve-bot" },
+  base: { sha: scope.baseSha, ref: "main" },
   head: { sha: scope.headSha, ref: "feature", repo: { full_name: "NicolaiSchmid/nunc-immo" } },
   ...overrides,
 });
@@ -37,6 +38,7 @@ class StackGitHub {
   createBlob = vi.fn(async () => ({ sha: "blob" }));
   createTree = vi.fn(async () => ({ sha: "tree" }));
   createCommit = vi.fn(async () => ({ sha: "commit" }));
+  getCommit = vi.fn(async () => ({ sha: "commit", tree: { sha: "tree" }, parents: [{ sha: scope.headSha }] }));
   createRef = vi.fn(async () => {
     this.ref = { ref: "ref", object: { sha: "commit", type: "commit" } };
     if (this.changeHeadAfterRef) this.headSha = "d".repeat(40);
@@ -45,7 +47,7 @@ class StackGitHub {
   deleteRef = vi.fn(async () => { this.ref = null; });
   closePull = vi.fn(async () => pull());
   createPull = vi.fn(async (_scope: ReviewScope, input: { title: string; head: string; base: string; body: string }) => {
-    const created = pull({ number: 8, html_url: "https://example.test/8", title: input.title, body: input.body, base: { sha: scope.headSha, ref: input.base }, head: { sha: "c".repeat(40), ref: input.head, repo: { full_name: "NicolaiSchmid/nunc-immo" } } });
+    const created = pull({ number: 8, html_url: "https://example.test/8", title: input.title, body: input.body, base: { sha: scope.headSha, ref: input.base }, head: { sha: "commit", ref: input.head, repo: { full_name: "NicolaiSchmid/nunc-immo" } } });
     if (this.changeHeadAfterPull) this.headSha = "d".repeat(40);
     return created;
   });
@@ -63,8 +65,9 @@ describe("stacked review pull requests", () => {
 
   it("continues marker rounds and skips empty or fork changes", async () => {
     const client = new StackGitHub();
-    client.getPull.mockResolvedValue(pull({ number: 8, body: stackMarker(7, 1, 7) }));
-    await expect(createStackedReviewPull(client as unknown as GitHubClient, { ...scope, number: 8 }, result)).resolves.toMatchObject({ round: 2 });
+    const parentBranch = `eve/review-7-round-1-${scope.baseSha.slice(0, 7)}`;
+    client.getPull.mockResolvedValue(pull({ number: 8, body: stackMarker(7, 1, 7), head: { ...pull().head, ref: parentBranch } }));
+    await expect(createStackedReviewPull(client as unknown as GitHubClient, { ...scope, number: 8, headRef: parentBranch }, result)).resolves.toMatchObject({ round: 2 });
     await expect(createStackedReviewPull(client as unknown as GitHubClient, scope, { ...result, changes: [] })).resolves.toEqual({ status: "skipped", reason: "no_changes" });
     await expect(createStackedReviewPull(client as unknown as GitHubClient, { ...scope, fork: "true" }, result)).resolves.toEqual({ status: "skipped", reason: "fork" });
   });
@@ -80,6 +83,51 @@ describe("stacked review pull requests", () => {
 
     client.getTree.mockResolvedValue({ sha: "source-tree", truncated: false, tree: [{ path: "src/a.ts", type: "commit", mode: "160000" }] });
     await expect(createStackedReviewPull(client as unknown as GitHubClient, scope, result)).rejects.toThrow("cannot replace commit entry");
+
+    client.getTree.mockResolvedValue({ sha: "source-tree", truncated: false, tree: [{ path: "src/a.ts", type: "blob", mode: "120000" }] });
+    await expect(createStackedReviewPull(client as unknown as GitHubClient, scope, result)).rejects.toThrow("mode 120000");
+  });
+
+  it("does not stack closed pulls or trust contributor-supplied markers", async () => {
+    const closed = new StackGitHub();
+    closed.getPull.mockResolvedValue(pull({ state: "closed" }));
+    await expect(createStackedReviewPull(closed as unknown as GitHubClient, scope, result)).resolves.toEqual({ status: "skipped", reason: "closed" });
+    expect(closed.createBlob).not.toHaveBeenCalled();
+
+    const spoofed = new StackGitHub();
+    spoofed.getPull.mockResolvedValue(pull({ body: stackMarker(99, 3, 1), user: { login: "contributor" } }));
+    await expect(createStackedReviewPull(spoofed as unknown as GitHubClient, scope, result)).resolves.toMatchObject({ round: 1 });
+  });
+
+  it("rejects unverified recovered refs and pull requests", async () => {
+    const badRef = new StackGitHub();
+    badRef.ref = { ref: "ref", object: { sha: "foreign", type: "commit" } };
+    badRef.getCommit.mockResolvedValue({ sha: "foreign", tree: { sha: "foreign-tree" }, parents: [{ sha: scope.headSha }] });
+    await expect(createStackedReviewPull(badRef as unknown as GitHubClient, scope, result)).rejects.toThrow("expected fix commit");
+
+    const badPull = new StackGitHub();
+    badPull.ref = { ref: "ref", object: { sha: "commit", type: "commit" } };
+    badPull.pulls = [pull({ number: 8, user: { login: "contributor" } })];
+    await expect(createStackedReviewPull(badPull as unknown as GitHubClient, scope, result)).rejects.toThrow("ownership validation");
+  });
+
+  it("compensates only an authenticated open stacked pull", async () => {
+    const client = new StackGitHub();
+    const branch = `eve/review-7-round-1-${scope.headSha.slice(0, 7)}`;
+    const stacked = pull({
+      number: 8,
+      body: stackMarker(7, 1, 7),
+      head: { ...pull().head, sha: "commit", ref: branch },
+    });
+    client.getPull.mockResolvedValue(stacked);
+    client.ref = { ref: branch, object: { sha: "commit", type: "commit" } };
+    await compensateStackedReviewPull(client as unknown as GitHubClient, scope, {
+      pull: stacked,
+      branch,
+      refSha: "commit",
+    });
+    expect(client.closePull).toHaveBeenCalledWith(scope, 8);
+    expect(client.deleteRef).toHaveBeenCalledWith(scope, branch);
   });
 
   it("skips no-op trees and compensates head changes", async () => {

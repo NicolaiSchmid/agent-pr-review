@@ -8,11 +8,18 @@ export type PullRequest = {
   html_url: string;
   title: string;
   body: string | null;
+  state: "open" | "closed";
+  user: GitHubUser;
   base: { sha: string; ref: string };
   head: { sha: string; ref: string; repo: { full_name: string } | null };
 };
 
 export type GitRef = { ref: string; object: { sha: string; type: string } };
+export type GitCommit = {
+  sha: string;
+  tree: { sha: string };
+  parents: Array<{ sha: string }>;
+};
 
 export type PullFile = {
   filename: string;
@@ -194,6 +201,13 @@ export class GitHubClient {
       "POST",
       `/repos/${scope.owner}/${scope.repo}/git/commits`,
       { message: input.message, tree: input.tree, parents: [input.parent] },
+    );
+  }
+
+  getCommit(scope: Pick<ReviewScope, "owner" | "repo">, sha: string) {
+    return this.request<GitCommit>(
+      "GET",
+      `/repos/${scope.owner}/${scope.repo}/git/commits/${encodeURIComponent(sha)}`,
     );
   }
 

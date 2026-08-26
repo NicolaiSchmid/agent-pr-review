@@ -40,10 +40,64 @@ const existingPullForBranch = async (
   client: GitHubClient,
   scope: ReviewScope,
   branch: string,
-) => (await client.listPullsByHead(scope, branch))[0] ?? null;
+) => (await client.listPullsByHead(scope, branch)).find((pull) => pull.state === "open") ?? null;
 
-const headMatches = async (client: GitHubClient, scope: ReviewScope) =>
-  (await client.getPull(scope)).head.sha === scope.headSha;
+const headMatches = async (client: GitHubClient, scope: ReviewScope) => {
+  const pull = await client.getPull(scope);
+  return pull.state === "open" && pull.head.sha === scope.headSha;
+};
+
+const verifiedStackParent = (
+  pull: PullRequest,
+  login: string,
+  scope: ReviewScope,
+) => {
+  const marker = parseStackMarker(pull.body);
+  if (!marker) return null;
+  const expectedBranch = `eve/review-${marker.root}-round-${marker.round}-${pull.base.sha.slice(0, 7)}`;
+  return pull.user.login.toLowerCase() === login &&
+    pull.head.repo?.full_name.toLowerCase() ===
+      `${scope.owner}/${scope.repo}`.toLowerCase() &&
+    pull.head.ref === expectedBranch
+    ? marker
+    : null;
+};
+
+const verifyRecoveredRef = async (
+  client: GitHubClient,
+  scope: ReviewScope,
+  sha: string,
+  expectedTree: string,
+) => {
+  const commit = await client.getCommit(scope, sha);
+  if (
+    commit.tree.sha !== expectedTree ||
+    commit.parents.length !== 1 ||
+    commit.parents[0]?.sha !== scope.headSha
+  ) {
+    throw new Error("Recovered review branch does not contain the expected fix commit");
+  }
+};
+
+const verifyRecoveredPull = (
+  pull: PullRequest,
+  login: string,
+  scope: ReviewScope,
+  branch: string,
+  refSha: string,
+  marker: string,
+) => {
+  if (
+    pull.state !== "open" ||
+    pull.user.login.toLowerCase() !== login ||
+    pull.base.ref !== scope.headRef ||
+    pull.head.ref !== branch ||
+    pull.head.sha !== refSha ||
+    !pull.body?.includes(marker)
+  ) {
+    throw new Error("Recovered review pull request failed ownership validation");
+  }
+};
 
 const deleteOwnedRef = async (
   client: GitHubClient,
@@ -53,6 +107,29 @@ const deleteOwnedRef = async (
 ) => {
   const current = await client.getRef(scope, branch);
   if (current?.object.sha === expectedSha) await client.deleteRef(scope, branch);
+};
+
+export const compensateStackedReviewPull = async (
+  client: GitHubClient,
+  scope: ReviewScope,
+  stacked: {
+    pull: PullRequest;
+    branch: string;
+    refSha: string;
+  },
+) => {
+  const login = await client.getAuthenticatedLogin();
+  const current = await client.getPull({ ...scope, number: stacked.pull.number });
+  if (
+    current.state === "open" &&
+    current.user.login.toLowerCase() === login &&
+    current.head.ref === stacked.branch &&
+    current.head.sha === stacked.refSha &&
+    current.body?.includes("<!-- eve-review-stack:")
+  ) {
+    await client.closePull(scope, current.number);
+    await deleteOwnedRef(client, scope, stacked.branch, stacked.refSha);
+  }
 };
 
 export const createStackedReviewPull = async (
@@ -67,6 +144,7 @@ export const createStackedReviewPull = async (
   validateChanges(result);
 
   const pull = await client.getPull(scope);
+  if (pull.state !== "open") return { status: "skipped", reason: "closed" } as const;
   if (pull.head.sha !== scope.headSha) return { status: "skipped", reason: "stale_head" } as const;
   if (pull.changed_files > 3_000) {
     return { status: "skipped", reason: "incomplete_pull_files" } as const;
@@ -93,7 +171,7 @@ export const createStackedReviewPull = async (
   ) {
     throw new Error("Validated finding paths and review change paths must match");
   }
-  const parent = parseStackMarker(pull.body);
+  const parent = verifiedStackParent(pull, login, scope);
   const root = parent?.root ?? scope.number;
   const round = (parent?.round ?? 0) + 1;
   if (round > env.maxReviewRounds) {
@@ -101,29 +179,33 @@ export const createStackedReviewPull = async (
   }
 
   const branch = `eve/review-${root}-round-${round}-${scope.headSha.slice(0, 7)}`;
-  const existing = await existingPullForBranch(client, scope, branch);
-  if (existing) return { status: "existing", pull: existing, round } as const;
+  const marker = stackMarker(root, round, scope.number);
+  const entries = new Map(sourceTree.tree.map((entry) => [entry.path, entry]));
+  for (const change of result.changes) {
+    const entry = entries.get(change.path);
+    if (
+      entry &&
+      (entry.type !== "blob" || !["100644", "100755"].includes(entry.mode))
+    ) {
+      throw new Error(
+        `Review changes cannot replace ${entry.type} entry with mode ${entry.mode}: ${change.path}`,
+      );
+    }
+  }
+  const blobs = await Promise.all(
+    result.changes.map(async (change) => ({
+      path: change.path,
+      sha: (await client.createBlob(scope, change.content)).sha,
+      mode: entries.get(change.path)?.mode,
+    })),
+  );
+  const tree = await client.createTree(scope, sourceTree.sha, blobs);
+  if (tree.sha === sourceTree.sha) {
+    return { status: "skipped", reason: "no_changes" } as const;
+  }
 
   let ref = await client.getRef(scope, branch);
   if (!ref) {
-    const entries = new Map(sourceTree.tree.map((entry) => [entry.path, entry]));
-    for (const change of result.changes) {
-      const entry = entries.get(change.path);
-      if (entry && entry.type !== "blob") {
-        throw new Error(`Review changes cannot replace ${entry.type} entry: ${change.path}`);
-      }
-    }
-    const blobs = await Promise.all(
-      result.changes.map(async (change) => ({
-        path: change.path,
-        sha: (await client.createBlob(scope, change.content)).sha,
-        mode: entries.get(change.path)?.mode,
-      })),
-    );
-    const tree = await client.createTree(scope, sourceTree.sha, blobs);
-    if (tree.sha === sourceTree.sha) {
-      return { status: "skipped", reason: "no_changes" } as const;
-    }
     const commit = await client.createCommit(scope, {
       message: `Address Eve review round ${round}`,
       tree: tree.sha,
@@ -140,6 +222,7 @@ export const createStackedReviewPull = async (
       if (!ref) throw error;
     }
   }
+  await verifyRecoveredRef(client, scope, ref.object.sha, tree.sha);
 
   if (!(await headMatches(client, scope))) {
     await deleteOwnedRef(client, scope, branch, ref.object.sha);
@@ -147,9 +230,18 @@ export const createStackedReviewPull = async (
   }
 
   const recovered = await existingPullForBranch(client, scope, branch);
-  if (recovered) return { status: "existing", pull: recovered, round } as const;
+  if (recovered) {
+    verifyRecoveredPull(recovered, login, scope, branch, ref.object.sha, marker);
+    return {
+      status: "existing",
+      pull: recovered,
+      round,
+      branch,
+      refSha: ref.object.sha,
+    } as const;
+  }
   const body = [
-    stackMarker(root, round, scope.number),
+    marker,
     `Stacks on #${scope.number}. Root review PR: #${root}.`,
     "",
     result.summary,
@@ -180,5 +272,12 @@ export const createStackedReviewPull = async (
     await deleteOwnedRef(client, scope, branch, ref.object.sha);
     return { status: "skipped", reason: "stale_head" } as const;
   }
-  return { status: "created", pull: created, round } as const;
+  verifyRecoveredPull(created, login, scope, branch, ref.object.sha, marker);
+  return {
+    status: "created",
+    pull: created,
+    round,
+    branch,
+    refSha: ref.object.sha,
+  } as const;
 };

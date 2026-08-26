@@ -9,7 +9,10 @@ import {
   updateProgress,
 } from "../lib/progress.js";
 import { parseReviewResult } from "../lib/result.js";
-import { createStackedReviewPull } from "../lib/stacked-pr.js";
+import {
+  compensateStackedReviewPull,
+  createStackedReviewPull,
+} from "../lib/stacked-pr.js";
 import {
   continuationTokenFor,
   parseSessionFailedRecovery,
@@ -174,7 +177,21 @@ export default defineChannel({
       try {
         const result = parseReviewResult(text);
         const client = new GitHubClient();
-        const stacked = await createStackedReviewPull(client, scope, result);
+        let stacked: Awaited<ReturnType<typeof createStackedReviewPull>> | {
+          status: "skipped";
+          reason: "stack_failed";
+        } = {
+          status: "skipped",
+          reason: "stack_failed",
+        };
+        try {
+          stacked = await createStackedReviewPull(client, scope, result);
+        } catch (stackError) {
+          console.error("stacked review PR creation failed; publishing review without fixes", {
+            scope: `${scope.owner}/${scope.repo}#${scope.number}@${scope.headSha}`,
+            error: conciseError(stackError),
+          });
+        }
         const publication = await publishReview(client, scope, result);
         if (
           !publication.published &&
@@ -182,6 +199,9 @@ export default defineChannel({
             publication.reason,
           )
         ) {
+          if (stacked.status === "created" || stacked.status === "existing") {
+            await compensateStackedReviewPull(client, scope, stacked);
+          }
           return;
         }
         if (!("counts" in publication)) {
