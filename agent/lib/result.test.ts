@@ -28,4 +28,13 @@ describe("parseReviewResult", () => {
       changes: [],
     });
   });
+
+  it("normalizes in-flight version 1 completions without stacked changes", () => {
+    const { changes: _changes, ...oldContract } = valid;
+    expect(parseReviewResult(JSON.stringify({ ...oldContract, version: 1 }))).toEqual({
+      ...valid,
+      version: 2,
+      changes: [],
+    });
+  });
 });

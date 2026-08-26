@@ -12,6 +12,7 @@ import { parseReviewResult } from "../lib/result.js";
 import {
   compensateStackedReviewPull,
   createStackedReviewPull,
+  verifyStackMutationIdentity,
 } from "../lib/stacked-pr.js";
 import {
   continuationTokenFor,
@@ -189,7 +190,8 @@ export default defineChannel({
           reason: "stack_failed",
         };
         try {
-          requireEnv("githubBotLogin");
+          const configuredLogin = requireEnv("githubBotLogin").toLowerCase();
+          await verifyStackMutationIdentity(client, configuredLogin);
           stacked = await createStackedReviewPull(client, scope, result);
         } catch (stackError) {
           console.error("stacked review PR creation failed; publishing review without fixes", {
@@ -197,7 +199,15 @@ export default defineChannel({
             error: conciseError(stackError),
           });
         }
-        const publication = await publishReview(client, scope, result);
+        let publication: Awaited<ReturnType<typeof publishReview>>;
+        try {
+          publication = await publishReview(client, scope, result);
+        } catch (publicationError) {
+          if (stacked.status === "created" || stacked.status === "existing") {
+            await compensateStackedReviewPull(client, scope, stacked);
+          }
+          throw publicationError;
+        }
         if (
           !publication.published &&
           ["stale", "stale_head", "stale_after_submit", "superseded"].includes(

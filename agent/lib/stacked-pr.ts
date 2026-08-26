@@ -16,6 +16,16 @@ export const parseStackMarker = (body: string | null | undefined) => {
     : null;
 };
 
+export const verifyStackMutationIdentity = async (
+  client: GitHubClient,
+  configuredLogin: string,
+) => {
+  const authenticatedLogin = await client.getAuthenticatedLogin();
+  if (configuredLogin.toLowerCase() !== authenticatedLogin) {
+    throw new Error("GITHUB_BOT_LOGIN does not match the GITHUB_TOKEN identity");
+  }
+};
+
 const validateChanges = (result: ReviewResult) => {
   if (result.changes.length > 20) throw new Error("A review round may change at most 20 files");
   const seen = new Set<string>();
@@ -272,6 +282,7 @@ export const createStackedReviewPull = async (
       : ["- None reported"]),
   ].join("\n");
   let created: PullRequest;
+  let createdNow = false;
   try {
     created = await client.createPull(scope, {
       title: `[Eve review ${round}/${env.maxReviewRounds}] ${findings[0]!.title}`,
@@ -279,6 +290,7 @@ export const createStackedReviewPull = async (
       base: scope.headRef,
       body,
     });
+    createdNow = true;
   } catch (error) {
     const recoveredPull = await existingPullForBranch(client, scope, branch);
     if (!recoveredPull) {
@@ -292,7 +304,20 @@ export const createStackedReviewPull = async (
     await deleteOwnedRef(client, scope, branch, ref.object.sha);
     return { status: "skipped", reason: "stale_head" } as const;
   }
-  verifyRecoveredPull(created, login, scope, branch, ref.object.sha, marker);
+  try {
+    verifyRecoveredPull(created, login, scope, branch, ref.object.sha, marker);
+  } catch (error) {
+    if (
+      createdNow &&
+      created.state === "open" &&
+      created.user.login.toLowerCase() === login &&
+      created.head.ref === branch &&
+      created.body?.includes(marker)
+    ) {
+      await client.closePull(scope, created.number);
+    }
+    throw error;
+  }
   return {
     status: "created",
     pull: created,

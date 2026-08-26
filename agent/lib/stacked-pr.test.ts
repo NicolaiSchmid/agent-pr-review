@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { GitHubClient, PullRequest } from "./github.js";
 import type { ReviewResult } from "./result.js";
 import type { ReviewScope } from "./scope.js";
-import { compensateStackedReviewPull, createStackedReviewPull, parseStackMarker, stackMarker } from "./stacked-pr.js";
+import { compensateStackedReviewPull, createStackedReviewPull, parseStackMarker, stackMarker, verifyStackMutationIdentity } from "./stacked-pr.js";
 
 const scope: ReviewScope = {
   owner: "NicolaiSchmid", repo: "nunc-immo", number: 7,
@@ -28,6 +28,7 @@ class StackGitHub {
   ref: { ref: string; object: { sha: string; type: string } } | null = null;
   changeHeadAfterRef = false;
   changeHeadAfterPull = false;
+  createdHeadSha = "commit";
   getPull = vi.fn(async () => pull({ head: { ...pull().head, sha: this.headSha } }));
   getAuthenticatedLogin = vi.fn(async () => "eve-bot");
   listPullFiles = vi.fn(async () => [{ filename: "src/a.ts", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-old\n+broken" }]);
@@ -51,13 +52,18 @@ class StackGitHub {
   deleteRef = vi.fn(async () => { this.ref = null; });
   closePull = vi.fn(async () => pull());
   createPull = vi.fn(async (_scope: ReviewScope, input: { title: string; head: string; base: string; body: string }) => {
-    const created = pull({ number: 8, html_url: "https://example.test/8", title: input.title, body: input.body, base: { sha: scope.headSha, ref: input.base }, head: { sha: "commit", ref: input.head, repo: { full_name: "NicolaiSchmid/nunc-immo" } } });
+    const created = pull({ number: 8, html_url: "https://example.test/8", title: input.title, body: input.body, base: { sha: scope.headSha, ref: input.base }, head: { sha: this.createdHeadSha, ref: input.head, repo: { full_name: "NicolaiSchmid/nunc-immo" } } });
     if (this.changeHeadAfterPull) this.headSha = "d".repeat(40);
     return created;
   });
 }
 
 describe("stacked review pull requests", () => {
+  it("requires configured and authenticated mutation identities to match", async () => {
+    const client = new StackGitHub();
+    await expect(verifyStackMutationIdentity(client as unknown as GitHubClient, "EVE-BOT")).resolves.toBeUndefined();
+    await expect(verifyStackMutationIdentity(client as unknown as GitHubClient, "other")).rejects.toThrow("does not match");
+  });
   it("creates a commit and PR on the reviewed branch", async () => {
     const client = new StackGitHub();
     const created = await createStackedReviewPull(client as unknown as GitHubClient, scope, result);
@@ -151,6 +157,13 @@ describe("stacked review pull requests", () => {
     client.createPull.mockRejectedValue(new Error("permission denied"));
     await expect(createStackedReviewPull(client as unknown as GitHubClient, scope, result)).rejects.toThrow("permission denied");
     expect(client.deleteRef).toHaveBeenCalledWith(scope, expect.stringContaining("eve/review-7-round-1"));
+  });
+
+  it("closes a newly created pull that fails ownership validation", async () => {
+    const client = new StackGitHub();
+    client.createdHeadSha = "foreign";
+    await expect(createStackedReviewPull(client as unknown as GitHubClient, scope, result)).rejects.toThrow("ownership validation");
+    expect(client.closePull).toHaveBeenCalledWith(scope, 8);
   });
 
   it("skips no-op trees and compensates head changes", async () => {

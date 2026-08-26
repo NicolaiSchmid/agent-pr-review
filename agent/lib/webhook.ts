@@ -66,6 +66,16 @@ export const isOwnStackedPull = (
   pull.user.login.toLowerCase() === botLogin?.toLowerCase() &&
   Boolean(pull.body?.includes("<!-- eve-review-stack:"));
 
+export const isBotActor = (event: {
+  sender: { login: string; type?: string };
+  pull_request: { user: { login: string; type?: string } };
+}) =>
+  event.sender.type === "Bot" ||
+  event.pull_request.user.type === "Bot" ||
+  [event.sender.login, event.pull_request.user.login].some((login) =>
+    login.toLowerCase().endsWith("[bot]"),
+  );
+
 export const evaluatePullRequestEvent = (
   payload: unknown,
   deliveryId: string | null,
@@ -88,15 +98,7 @@ export const evaluatePullRequestEvent = (
   if (event.pull_request.draft && event.action !== "ready_for_review") {
     return { accepted: false, reason: "draft_ignored" };
   }
-  const logins = [event.sender.login, event.pull_request.user.login];
-  const isBot =
-    event.sender.type === "Bot" ||
-    event.pull_request.user.type === "Bot" ||
-    logins.some(
-      (login) =>
-        login.toLowerCase().endsWith("[bot]") ||
-        (env.githubBotLogin && login.toLowerCase() === env.githubBotLogin),
-    );
+  const isBot = isBotActor(event);
   if (
     isBot &&
     event.pull_request.body?.includes("<!-- eve-review-stack:") &&

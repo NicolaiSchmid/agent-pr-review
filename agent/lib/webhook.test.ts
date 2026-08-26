@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { evaluatePullRequestEvent, isOwnStackedPull, verifyWebhookSignature } from "./webhook.js";
+import { evaluatePullRequestEvent, isBotActor, isOwnStackedPull, verifyWebhookSignature } from "./webhook.js";
 
 const payload = (overrides: Record<string, unknown> = {}) => ({
   action: "opened",
@@ -79,6 +79,17 @@ describe("pull request event filtering", () => {
     expect(isOwnStackedPull(marked, "eve[bot]")).toBe(true);
     expect(isOwnStackedPull({ ...marked, user: { login: "other[bot]" } }, "eve[bot]")).toBe(false);
     expect(isOwnStackedPull({ ...marked, body: "ordinary PR" }, "eve[bot]")).toBe(false);
+  });
+
+  it("does not classify a configured PAT's human user as a bot", () => {
+    expect(isBotActor({
+      sender: { login: "owner", type: "User" },
+      pull_request: { user: { login: "owner", type: "User" } },
+    })).toBe(false);
+    expect(isBotActor({
+      sender: { login: "app[bot]", type: "Bot" },
+      pull_request: { user: { login: "owner", type: "User" } },
+    })).toBe(true);
   });
 
   it("reports missing bot configuration for marked stacked webhooks", () => {
