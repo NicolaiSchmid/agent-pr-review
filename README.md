@@ -36,6 +36,8 @@ No runtime secret is needed to install, typecheck, test, or build. Runtime requi
 
 If `GITHUB_SANDBOX_TOKEN` is absent, scoped host tools provide the tree and file contents safely. That supports static review but not arbitrary Git commands or test execution. Set it for the intended full workflow.
 
+Environment variables are validated and transformed at startup with T3 Env. Empty values are treated as unset, defaults are applied consistently, and malformed URLs, booleans, or positive-integer limits fail fast before the agent begins handling webhooks.
+
 ## GitHub Configuration
 
 For v1, a fine-grained PAT is sufficient. Restrict it to `NicolaiSchmid/nunc-immo` with:
