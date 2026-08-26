@@ -13,6 +13,7 @@ export const env = {
   githubApiUrl: read("GITHUB_API_URL") ?? "https://api.github.com",
   allowForkExecution: read("ALLOW_FORK_EXECUTION") === "true",
   maxFindings: Number(read("MAX_FINDINGS") ?? "12"),
+  maxReviewRounds: Number(read("MAX_REVIEW_ROUNDS") ?? "3"),
 };
 
 export const requireEnv = (name: keyof typeof env): string => {

@@ -12,7 +12,7 @@ export const findingSchema = z.object({
 });
 
 export const reviewResultSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   summary: z.string().min(1),
   tests: z.array(
     z.object({
@@ -22,6 +22,12 @@ export const reviewResultSchema = z.object({
     }),
   ),
   findings: z.array(findingSchema),
+  changes: z.array(
+    z.object({
+      path: z.string().min(1),
+      content: z.string(),
+    }),
+  ),
 });
 
 export type ReviewResult = z.infer<typeof reviewResultSchema>;

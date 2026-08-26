@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { evaluatePullRequestEvent, verifyWebhookSignature } from "./webhook.js";
+import { evaluatePullRequestEvent, isOwnStackedPull, verifyWebhookSignature } from "./webhook.js";
 
 const payload = (overrides: Record<string, unknown> = {}) => ({
   action: "opened",
@@ -73,4 +73,12 @@ describe("pull request event filtering", () => {
     const decision = evaluatePullRequestEvent(fork, "d");
     expect(decision.accepted && decision.scope.allowExecution).toBe("false");
   });
+
+  it("recognizes only marked pull requests owned by the configured bot", () => {
+    const marked = { user: { login: "eve[bot]" }, body: "<!-- eve-review-stack:root=7;round=1;parent=7 -->" };
+    expect(isOwnStackedPull(marked, "eve[bot]")).toBe(true);
+    expect(isOwnStackedPull({ ...marked, user: { login: "other[bot]" } }, "eve[bot]")).toBe(false);
+    expect(isOwnStackedPull({ ...marked, body: "ordinary PR" }, "eve[bot]")).toBe(false);
+  });
+
 });

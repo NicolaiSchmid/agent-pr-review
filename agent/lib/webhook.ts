@@ -15,6 +15,7 @@ const pullRequestSchema = z.object({
     number: z.number().int().positive(),
     draft: z.boolean().optional().default(false),
     user: z.object({ login: z.string(), type: z.string().optional() }),
+    body: z.string().nullable().optional(),
     base: z.object({
       sha: z.string(),
       ref: z.string(),
@@ -57,6 +58,14 @@ export type WebhookDecision =
   | { accepted: true; scope: ReviewScope; title: string }
   | { accepted: false; reason: string };
 
+export const isOwnStackedPull = (
+  pull: { body?: string | null; user: { login: string } },
+  botLogin: string | undefined,
+) =>
+  Boolean(botLogin) &&
+  pull.user.login.toLowerCase() === botLogin?.toLowerCase() &&
+  Boolean(pull.body?.includes("<!-- eve-review-stack:"));
+
 export const evaluatePullRequestEvent = (
   payload: unknown,
   deliveryId: string | null,
@@ -88,7 +97,9 @@ export const evaluatePullRequestEvent = (
         login.toLowerCase().endsWith("[bot]") ||
         (env.githubBotLogin && login.toLowerCase() === env.githubBotLogin),
     );
-  if (isBot) return { accepted: false, reason: "bot_ignored" };
+  if (isBot && !isOwnStackedPull(event.pull_request, env.githubBotLogin)) {
+    return { accepted: false, reason: "bot_ignored" };
+  }
 
   const headRepo = event.pull_request.head.repo;
   const fork =

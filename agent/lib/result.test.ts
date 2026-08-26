@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import { parseReviewResult } from "./result.js";
 
 const valid = {
-  version: 1,
+  version: 2,
   summary: "No defects found.",
   tests: [{ command: "pnpm test", result: "passed" }],
   findings: [],
+  changes: [],
 };
 
 describe("parseReviewResult", () => {
@@ -15,7 +16,7 @@ describe("parseReviewResult", () => {
   });
 
   it("rejects malformed contracts", () => {
-    expect(() => parseReviewResult('{"version":2,"summary":"x"}')).toThrow(
+    expect(() => parseReviewResult('{"version":1,"summary":"x"}')).toThrow(
       "valid review result",
     );
   });

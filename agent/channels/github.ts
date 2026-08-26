@@ -9,6 +9,7 @@ import {
   updateProgress,
 } from "../lib/progress.js";
 import { parseReviewResult } from "../lib/result.js";
+import { createStackedReviewPull } from "../lib/stacked-pr.js";
 import {
   continuationTokenFor,
   parseSessionFailedRecovery,
@@ -172,7 +173,9 @@ export default defineChannel({
       const scope = scopeFromContext(ctx);
       try {
         const result = parseReviewResult(text);
-        const publication = await publishReview(new GitHubClient(), scope, result);
+        const client = new GitHubClient();
+        const stacked = await createStackedReviewPull(client, scope, result);
+        const publication = await publishReview(client, scope, result);
         if (
           !publication.published &&
           ["stale", "stale_head", "stale_after_submit", "superseded"].includes(
@@ -188,7 +191,10 @@ export default defineChannel({
           new GitHubClient(),
           scope,
           renderProgress(scope, "completed", {
-            summary: result.summary,
+            summary:
+              stacked.status === "created" || stacked.status === "existing"
+                ? `${result.summary}\n\nSuggested changes: ${stacked.pull.html_url}`
+                : result.summary,
             tests: result.tests.map((test) => `${test.result}: ${test.command}`),
             findings: publication.counts,
           }),
