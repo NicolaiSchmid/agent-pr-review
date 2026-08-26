@@ -15,6 +15,7 @@ const pullRequestSchema = z.object({
     number: z.number().int().positive(),
     draft: z.boolean().optional().default(false),
     user: z.object({ login: z.string(), type: z.string().optional() }),
+    body: z.string().nullable().optional(),
     base: z.object({
       sha: z.string(),
       ref: z.string(),
@@ -57,6 +58,24 @@ export type WebhookDecision =
   | { accepted: true; scope: ReviewScope; title: string }
   | { accepted: false; reason: string };
 
+export const isOwnStackedPull = (
+  pull: { body?: string | null; user: { login: string } },
+  botLogin: string | undefined,
+) =>
+  Boolean(botLogin) &&
+  pull.user.login.toLowerCase() === botLogin?.toLowerCase() &&
+  Boolean(pull.body?.includes("<!-- eve-review-stack:"));
+
+export const isBotActor = (event: {
+  sender: { login: string; type?: string };
+  pull_request: { user: { login: string; type?: string } };
+}) =>
+  event.sender.type === "Bot" ||
+  event.pull_request.user.type === "Bot" ||
+  [event.sender.login, event.pull_request.user.login].some((login) =>
+    login.toLowerCase().endsWith("[bot]"),
+  );
+
 export const evaluatePullRequestEvent = (
   payload: unknown,
   deliveryId: string | null,
@@ -79,16 +98,17 @@ export const evaluatePullRequestEvent = (
   if (event.pull_request.draft && event.action !== "ready_for_review") {
     return { accepted: false, reason: "draft_ignored" };
   }
-  const logins = [event.sender.login, event.pull_request.user.login];
-  const isBot =
-    event.sender.type === "Bot" ||
-    event.pull_request.user.type === "Bot" ||
-    logins.some(
-      (login) =>
-        login.toLowerCase().endsWith("[bot]") ||
-        (env.githubBotLogin && login.toLowerCase() === env.githubBotLogin),
-    );
-  if (isBot) return { accepted: false, reason: "bot_ignored" };
+  const isBot = isBotActor(event);
+  if (
+    isBot &&
+    event.pull_request.body?.includes("<!-- eve-review-stack:") &&
+    !env.githubBotLogin
+  ) {
+    return { accepted: false, reason: "bot_login_required" };
+  }
+  if (isBot && !isOwnStackedPull(event.pull_request, env.githubBotLogin)) {
+    return { accepted: false, reason: "bot_ignored" };
+  }
 
   const headRepo = event.pull_request.head.repo;
   const fork =

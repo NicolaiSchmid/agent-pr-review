@@ -10,12 +10,17 @@ import {
 } from "../lib/progress.js";
 import { parseReviewResult } from "../lib/result.js";
 import {
+  compensateStackedReviewPull,
+  createStackedReviewPull,
+  verifyStackMutationIdentity,
+} from "../lib/stacked-pr.js";
+import {
   continuationTokenFor,
   parseSessionFailedRecovery,
   scopeFromContext,
   type ReviewScope,
 } from "../lib/scope.js";
-import { env } from "../lib/env.js";
+import { env, requireEnv } from "../lib/env.js";
 import {
   evaluatePullRequestEvent,
   verifyWebhookSignature,
@@ -69,7 +74,11 @@ export default defineChannel({
         request.headers.get("x-github-delivery"),
       );
       if (!decision.accepted) {
-        const status = decision.reason.startsWith("malformed") || decision.reason.startsWith("missing") ? 400 : 202;
+        const status = decision.reason === "bot_login_required"
+          ? 503
+          : decision.reason.startsWith("malformed") || decision.reason.startsWith("missing")
+            ? 400
+            : 202;
         return Response.json(decision, { status });
       }
 
@@ -172,13 +181,42 @@ export default defineChannel({
       const scope = scopeFromContext(ctx);
       try {
         const result = parseReviewResult(text);
-        const publication = await publishReview(new GitHubClient(), scope, result);
+        const client = new GitHubClient();
+        let stacked: Awaited<ReturnType<typeof createStackedReviewPull>> | {
+          status: "skipped";
+          reason: "stack_failed";
+        } = {
+          status: "skipped",
+          reason: "stack_failed",
+        };
+        try {
+          const configuredLogin = requireEnv("githubBotLogin").toLowerCase();
+          await verifyStackMutationIdentity(client, configuredLogin);
+          stacked = await createStackedReviewPull(client, scope, result);
+        } catch (stackError) {
+          console.error("stacked review PR creation failed; publishing review without fixes", {
+            scope: `${scope.owner}/${scope.repo}#${scope.number}@${scope.headSha}`,
+            error: conciseError(stackError),
+          });
+        }
+        let publication: Awaited<ReturnType<typeof publishReview>>;
+        try {
+          publication = await publishReview(client, scope, result);
+        } catch (publicationError) {
+          if (stacked.status === "created" || stacked.status === "existing") {
+            await compensateStackedReviewPull(client, scope, stacked);
+          }
+          throw publicationError;
+        }
         if (
           !publication.published &&
           ["stale", "stale_head", "stale_after_submit", "superseded"].includes(
             publication.reason,
           )
         ) {
+          if (stacked.status === "created" || stacked.status === "existing") {
+            await compensateStackedReviewPull(client, scope, stacked);
+          }
           return;
         }
         if (!("counts" in publication)) {
@@ -188,7 +226,10 @@ export default defineChannel({
           new GitHubClient(),
           scope,
           renderProgress(scope, "completed", {
-            summary: result.summary,
+            summary:
+              stacked.status === "created" || stacked.status === "existing"
+                ? `${result.summary}\n\nSuggested changes: ${stacked.pull.html_url}`
+                : result.summary,
             tests: result.tests.map((test) => `${test.result}: ${test.command}`),
             findings: publication.counts,
           }),

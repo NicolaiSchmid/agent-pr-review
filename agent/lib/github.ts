@@ -7,8 +7,18 @@ export type PullRequest = {
   draft: boolean;
   html_url: string;
   title: string;
+  body: string | null;
+  state: "open" | "closed";
+  user: GitHubUser;
   base: { sha: string; ref: string };
   head: { sha: string; ref: string; repo: { full_name: string } | null };
+};
+
+export type GitRef = { ref: string; object: { sha: string; type: string } };
+export type GitCommit = {
+  sha: string;
+  tree: { sha: string };
+  parents: Array<{ sha: string }>;
 };
 
 export type PullFile = {
@@ -141,6 +151,114 @@ export class GitHubClient {
     );
   }
 
+  async getRef(
+    scope: Pick<ReviewScope, "owner" | "repo">,
+    ref: string,
+  ) {
+    try {
+      return await this.request<GitRef>(
+        "GET",
+        `/repos/${scope.owner}/${scope.repo}/git/ref/heads/${encodeURIComponent(ref)}`,
+      );
+    } catch (error) {
+      if (error instanceof GitHubError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
+  createBlob(scope: Pick<ReviewScope, "owner" | "repo">, content: string) {
+    return this.request<{ sha: string }>(
+      "POST",
+      `/repos/${scope.owner}/${scope.repo}/git/blobs`,
+      { content, encoding: "utf-8" },
+    );
+  }
+
+  createTree(
+    scope: Pick<ReviewScope, "owner" | "repo">,
+    baseTree: string,
+    entries: Array<{ path: string; sha: string; mode?: string }>,
+  ) {
+    return this.request<{ sha: string }>(
+      "POST",
+      `/repos/${scope.owner}/${scope.repo}/git/trees`,
+      {
+        base_tree: baseTree,
+        tree: entries.map((entry) => ({
+          ...entry,
+          mode: entry.mode ?? "100644",
+          type: "blob",
+        })),
+      },
+    );
+  }
+
+  createCommit(
+    scope: Pick<ReviewScope, "owner" | "repo">,
+    input: { message: string; tree: string; parent: string },
+  ) {
+    return this.request<{ sha: string }>(
+      "POST",
+      `/repos/${scope.owner}/${scope.repo}/git/commits`,
+      { message: input.message, tree: input.tree, parents: [input.parent] },
+    );
+  }
+
+  getCommit(scope: Pick<ReviewScope, "owner" | "repo">, sha: string) {
+    return this.request<GitCommit>(
+      "GET",
+      `/repos/${scope.owner}/${scope.repo}/git/commits/${encodeURIComponent(sha)}`,
+    );
+  }
+
+  createRef(
+    scope: Pick<ReviewScope, "owner" | "repo">,
+    ref: string,
+    sha: string,
+  ) {
+    return this.request<GitRef>(
+      "POST",
+      `/repos/${scope.owner}/${scope.repo}/git/refs`,
+      { ref: `refs/heads/${ref}`, sha },
+    );
+  }
+
+  deleteRef(scope: Pick<ReviewScope, "owner" | "repo">, ref: string) {
+    return this.request<void>(
+      "DELETE",
+      `/repos/${scope.owner}/${scope.repo}/git/refs/heads/${encodeURIComponent(ref)}`,
+    );
+  }
+
+  listPullsByHead(
+    scope: Pick<ReviewScope, "owner" | "repo">,
+    branch: string,
+  ) {
+    return this.paginate<PullRequest>(
+      `/repos/${scope.owner}/${scope.repo}/pulls?state=all&head=${encodeURIComponent(`${scope.owner}:${branch}`)}`,
+      { maxPages: 2 },
+    );
+  }
+
+  createPull(
+    scope: Pick<ReviewScope, "owner" | "repo">,
+    input: { title: string; head: string; base: string; body: string },
+  ) {
+    return this.request<PullRequest>(
+      "POST",
+      `/repos/${scope.owner}/${scope.repo}/pulls`,
+      { ...input, draft: false },
+    );
+  }
+
+  closePull(scope: Pick<ReviewScope, "owner" | "repo">, number: number) {
+    return this.request<PullRequest>(
+      "PATCH",
+      `/repos/${scope.owner}/${scope.repo}/pulls/${number}`,
+      { state: "closed" },
+    );
+  }
+
   listPullFiles(
     scope: Pick<ReviewScope, "owner" | "repo" | "number">,
     changedFiles: number,
@@ -210,8 +328,9 @@ export class GitHubClient {
   getTree(scope: ReviewScope, revision: "base" | "head") {
     const ref = revision === "base" ? scope.baseSha : scope.headSha;
     return this.request<{
+      sha: string;
       truncated: boolean;
-      tree: Array<{ path: string; type: "blob" | "tree"; size?: number }>;
+      tree: Array<{ path: string; type: "blob" | "tree" | "commit"; mode: string; size?: number }>;
     }>(
       "GET",
       `/repos/${scope.owner}/${scope.repo}/git/trees/${ref}?recursive=1`,

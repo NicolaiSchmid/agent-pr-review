@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import { parseReviewResult } from "./result.js";
 
 const valid = {
-  version: 1,
+  version: 2,
   summary: "No defects found.",
   tests: [{ command: "pnpm test", result: "passed" }],
   findings: [],
+  changes: [],
 };
 
 describe("parseReviewResult", () => {
@@ -15,8 +16,25 @@ describe("parseReviewResult", () => {
   });
 
   it("rejects malformed contracts", () => {
-    expect(() => parseReviewResult('{"version":2,"summary":"x"}')).toThrow(
+    expect(() => parseReviewResult('{"version":1,"summary":"x"}')).toThrow(
       "valid review result",
     );
+  });
+
+  it("defaults omitted changes to an empty array so reviews still publish", () => {
+    const { changes: _changes, ...withoutChanges } = valid;
+    expect(parseReviewResult(JSON.stringify(withoutChanges))).toEqual({
+      ...withoutChanges,
+      changes: [],
+    });
+  });
+
+  it("normalizes in-flight version 1 completions without stacked changes", () => {
+    const { changes: _changes, ...oldContract } = valid;
+    expect(parseReviewResult(JSON.stringify({ ...oldContract, version: 1 }))).toEqual({
+      ...valid,
+      version: 2,
+      changes: [],
+    });
   });
 });

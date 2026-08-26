@@ -28,10 +28,11 @@ const scope: ReviewScope = {
   allowExecution: "true",
 };
 const result: ReviewResult = {
-  version: 1,
+  version: 2,
   summary: "No actionable defects.",
   tests: [],
   findings: [],
+  changes: [],
 };
 
 class ReviewGitHub {
