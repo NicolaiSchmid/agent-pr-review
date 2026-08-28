@@ -338,7 +338,7 @@ export default githubChannel({
         }>(claim.taskId, claim.leaseToken);
         if (!postClaim.claimed) return;
         let existingCommentId: number | undefined = postClaim.comment_id ?? undefined;
-        for (let page = 1; !existingCommentId; page += 1) {
+        for (let page = 1; !existingCommentId && page <= 30; page += 1) {
           const comments = await channel.github.request<Array<{
             id: number; body?: string; user?: { login?: string; type?: string };
           }>>({
@@ -446,7 +446,7 @@ export default githubChannel({
         const task = completed[cleanupIndex]!;
         const marker = `<!-- eve-ci-result:${task.id} -->`;
         let commentId: number | undefined;
-        for (let page = 1; !commentId; page += 1) {
+        for (let page = 1; !commentId && page <= 30; page += 1) {
           const comments = await ctx.github.request<Array<{
             id: number; body?: string; user?: { login?: string; type?: string };
           }>>({
@@ -473,6 +473,16 @@ export default githubChannel({
           task.id, task.result_state,
         );
         if (!acknowledged) {
+          const current = await store.rerunDisposition(task.id);
+          if (commentId && current?.body &&
+            (current.result_state === "publishing" || current.result_state === "completed")) {
+            await ctx.github.request({
+              method: "PATCH",
+              path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/issues/comments/${commentId}`,
+              body: { body: current.body },
+            });
+            continue;
+          }
           const pull = await ctx.github.request<{
             head: { sha: string }; merged: boolean; state: string;
           }>({

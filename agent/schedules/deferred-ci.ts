@@ -245,12 +245,27 @@ export default defineSchedule({
             ? await currentCiIsTerminal(task, repository)
             : null;
           if (ci?.terminal && task.ci_conclusion === ci.conclusion) return;
-          await store.holdRerun(task.repository_id, task.head_sha);
-          const cleanup = await store.resolveRerunPull<Array<{
+          const heldPulls = await store.holdRerun<number[]>(task.repository_id, task.head_sha);
+          const cleanup: Array<{
             id: string; pull_request_number: number;
             result_state: "reopened" | "superseded" | "cancelled";
             result_comment_id: number | null;
-          }>>(task.repository_id, task.pull_request_number, task.head_sha, disposition);
+          }> = [];
+          for (const pullRequestNumber of heldPulls) {
+            let heldDisposition = disposition;
+            if (pullRequestNumber !== task.pull_request_number) {
+              const heldTask = { ...task, pull_request_number: pullRequestNumber };
+              const heldPull = await currentPullRequestHead(heldTask, repository);
+              heldDisposition = !heldPull.open
+                ? "cancelled"
+                : heldPull.headSha !== task.head_sha.toLowerCase()
+                  ? "superseded"
+                  : "valid";
+            }
+            cleanup.push(...await store.resolveRerunPull<typeof cleanup>(
+              task.repository_id, pullRequestNumber, task.head_sha, heldDisposition,
+            ));
+          }
           for (const item of cleanup) {
             await cleanupStaleResult(
               {

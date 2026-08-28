@@ -61,7 +61,7 @@ export const deferCi = mutationGeneric({
 
 export const transitionTask = mutationGeneric({
   args: { secret: v.string(), repositoryId: v.string(), pullRequestNumber: v.number(), headSha: v.string(), from: v.string(), to: v.string(), taskId: v.string(), leaseToken: v.string() },
-  handler: async ({ db }, a) => { authorize(a.secret); const t: any = await db.query("tasks").withIndex("by_external_id", q => q.eq("externalId", a.taskId)).unique(); if (!t || t.repositoryId !== a.repositoryId || t.headSha !== a.headSha || t.state !== a.from || t.kind !== "pr_review" || t.leaseToken !== a.leaseToken) return false; const c: any = await db.get(t.conversationId); if (c?.pullRequestNumber !== a.pullRequestNumber) return false; await db.patch(t._id, { state: a.to, claimState:t.rerunCleanupPending||t.rerunHold?undefined:a.to, updatedAt: Date.now() }); return true; },
+  handler: async ({ db }, a) => { authorize(a.secret); const t: any = await db.query("tasks").withIndex("by_external_id", q => q.eq("externalId", a.taskId)).unique(); if (!t || t.repositoryId !== a.repositoryId || t.headSha !== a.headSha || t.state !== a.from || t.kind !== "pr_review" || t.leaseToken !== a.leaseToken) return false; const c: any = await db.get(t.conversationId); if (c?.pullRequestNumber !== a.pullRequestNumber) return false; await db.patch(t._id, { state: a.to, claimState:t.rerunCleanupPending||t.rerunHold?undefined:a.to,...(a.from==="publishing"&&a.to!=="publishing"?{resultPostClaim:undefined,resultPostClaimAt:undefined}:{}), updatedAt: Date.now() }); return true; },
 });
 
 export const taskMatches = queryGeneric({
