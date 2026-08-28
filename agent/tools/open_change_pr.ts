@@ -449,6 +449,17 @@ export default defineTool({
       }
     }
     if (alreadyOpen) {
+      if (operation.retryable_closure) {
+        const generatedBase = await approvedCommitBase(alreadyOpen.head.sha);
+        if (generatedBase === await liveBaseSha()) {
+          throw new Error("Retryable closure no longer points at a stale generated commit");
+        }
+        await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" }, false);
+        await releaseOperationPull(alreadyOpen.number);
+        alreadyOpen = undefined;
+      }
+    }
+    if (alreadyOpen) {
       if (!alreadyOpen.draft) {
         throw new Error("Refusing to recover a pull request that is no longer a draft");
       }

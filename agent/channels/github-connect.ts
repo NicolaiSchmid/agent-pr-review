@@ -270,6 +270,7 @@ export default githubChannel({
       );
       if (!claimed) return;
       const marker = `<!-- eve-ci-result:${claim.taskId} -->`;
+      let publishedCommentId: number | undefined;
       const compensatePublishedComment = async (reason: string) => {
         const current = await store.rerunDisposition(claim.taskId);
         const newerBody = current?.lease_token !== claim.leaseToken &&
@@ -277,7 +278,7 @@ export default githubChannel({
           ? current.body
           : null;
         const replacement = newerBody ?? `${reason}\n\n${marker}`;
-        let persistedId = current?.comment_id ?? undefined;
+        const persistedId = publishedCommentId ?? current?.comment_id ?? undefined;
         if (persistedId) {
           await channel.github.request({
             method: "PATCH",
@@ -369,6 +370,7 @@ export default githubChannel({
           if (comments.body.length < 100) break;
         }
         if (existingCommentId) {
+          publishedCommentId = existingCommentId;
           try {
             await channel.github.request({
               method: "PATCH",
@@ -382,10 +384,12 @@ export default githubChannel({
                 claim.taskId, claim.leaseToken, existingCommentId,
               )) throw error;
             const posted = await channel.thread.post(body);
+            publishedCommentId = posted.id;
             await store.recordResultComment(claim.taskId, claim.leaseToken, posted.id, body);
           }
         } else {
           const posted = await channel.thread.post(body);
+          publishedCommentId = posted.id;
           await store.recordResultComment(claim.taskId, claim.leaseToken, posted.id, body);
         }
         const stillCurrent = await canPublishCiTask(channel, claim.taskId, claim.leaseToken);
@@ -570,6 +574,11 @@ export default githubChannel({
   },
   onPullRequest: async (ctx, pullRequest) => {
     if (!pullRequest.headSha || pullRequest.action !== "synchronize") return null;
+    const livePull = await ctx.github.request<{ head: { sha: string } }>({
+      method: "GET",
+      path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/pulls/${pullRequest.pullRequestNumber}`,
+    });
+    if (livePull.body.head.sha.toLowerCase() !== pullRequest.headSha.toLowerCase()) return null;
     const completed = await store.supersedeOldHeads<Array<{ id: string; head_sha: string; result_comment_id: number | null }>>(
       String(ctx.repository.id), pullRequest.pullRequestNumber, pullRequest.headSha.toLowerCase(),
     );
