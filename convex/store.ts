@@ -24,7 +24,7 @@ export const searchMemoryPage = queryGeneric({
   handler: async ({ db }, a) => {
     authorize(a.secret);
     const result = await db.query("memoryRecords").withSearchIndex("search_content", q => q.search("content", a.query).eq("scopeStatus", `${a.scopeKey}\u0000confirmed`)).paginate({ cursor: a.cursor, numItems: a.limit });
-    return { ...result, page: result.page.map((m: any) => ({ id: m.externalId, scope_kind: m.scopeKind, scope_key: m.scopeKey, content: m.content, tags: m.tags, source_url: m.sourceUrl ?? null, author_principal_id: m.authorPrincipalId, status: m.status, created_at: new Date(m._creationTime).toISOString(), updated_at: m.updatedAt, expires_at: m.expiresAt ? new Date(m.expiresAt).toISOString() : null })) };
+    return { ...result, page: result.page.map((m: any) => ({ id: m.externalId, scope_kind: m.scopeKind, scope_key: m.scopeKey, content: m.content, tags: m.tags, source_url: m.sourceUrl ?? null, author_principal_id: m.authorPrincipalId, status: m.status, created_at: new Date(m._creationTime).toISOString(), updated_at: m.updatedAt, expires_at: m.expiresAt === undefined ? null : new Date(m.expiresAt).toISOString() })) };
   },
 });
 

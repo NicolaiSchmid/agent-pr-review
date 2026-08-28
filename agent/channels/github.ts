@@ -24,6 +24,11 @@ import {
 const conciseError = (error: unknown) =>
   (error instanceof Error ? error.message : String(error)).slice(0, 500);
 
+const sanitizeReservedMarkers = (message: string) => message.replace(
+  /<!--\s*eve-(?:ci-result|reply|change-operation):[^>]*-->/gi,
+  "",
+);
+
 const dispatchClaims = new Set<string>();
 
 const failProgress = async (scope: ReviewScope, error: unknown) => {
@@ -172,6 +177,19 @@ export default defineChannel({
       const scope = scopeFromContext(ctx);
       try {
         const result = parseReviewResult(text);
+        result.summary = sanitizeReservedMarkers(result.summary);
+        result.tests = result.tests.map((test) => ({
+          ...test,
+          command: sanitizeReservedMarkers(test.command),
+          ...(test.details
+            ? { details: sanitizeReservedMarkers(test.details) }
+            : {}),
+        }));
+        result.findings = result.findings.map((finding) => ({
+          ...finding,
+          title: sanitizeReservedMarkers(finding.title),
+          body: sanitizeReservedMarkers(finding.body),
+        }));
         const publication = await publishReview(new GitHubClient(), scope, result);
         if (
           !publication.published &&

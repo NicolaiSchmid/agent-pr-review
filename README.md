@@ -76,7 +76,7 @@ npx convex env set CONVEX_AGENT_SECRET "$CONVEX_AGENT_SECRET"
 
 For v1, a fine-grained PAT is sufficient. Restrict it to `NicolaiSchmid/nunc-immo` with:
 
-- Contents: read
+- Contents: write (required for `open_change_pr` to create commits and branches)
 - Pull requests: read and write
 - Issues: read and write
 - Metadata: read

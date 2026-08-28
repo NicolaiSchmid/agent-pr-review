@@ -136,19 +136,24 @@ export default defineSchedule({
           tasks.map(async (task) => {
             try {
               const repository = await resolveRepository(task);
-              await cleanupStaleResult(
-                task, repository,
-                "CI result publication was interrupted and will be revalidated.",
-              );
               const pull = await currentPullRequestHead(task, repository);
               if (!pull.open) {
+                await cleanupStaleResult(
+                  task, repository,
+                  "CI result cancelled because the pull request is no longer open.",
+                );
                 await cancel(task.id, task.lease_token);
                 return;
               }
               if (pull.headSha !== task.head_sha.toLowerCase()) {
+                await cleanupStaleResult(task, repository);
                 await supersede(task.id, task.lease_token);
                 return;
               }
+              await cleanupStaleResult(
+                task, repository,
+                "CI result publication was interrupted and will be revalidated.",
+              );
               const session = await receive(github, {
                 message: [
                   `Re-evaluate deferred CI task ${task.id} for exact head ${task.head_sha}.`,
