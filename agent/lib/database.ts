@@ -24,7 +24,9 @@ export const store = {
       let cursor: string | null = null;
       let done = false;
       let valid = 0;
-      while (!done && valid < limit) {
+      let pages = 0;
+      while (!done && valid < limit && pages < 30) {
+        pages += 1;
         const page = await convex().query(query("searchMemoryPage"), args({
           scopeKey, query: search, limit: Math.max(limit, 20), cursor,
         })) as { page: Array<Record<string, unknown>>; continueCursor: string; isDone: boolean };

@@ -176,11 +176,12 @@ export default defineTool({
         return { ...validated, commitSha: validated.head.sha };
       } catch (error) {
         if (createdPullNumber) {
-          const created = await request<{ head: { sha: string }; state: string }>(
+          const created = await request<{ head: { sha: string }; state: string; draft: boolean }>(
             "GET", `${root}/pulls/${createdPullNumber}`, undefined, false,
           );
           if (created.state === "open" &&
-            (error instanceof CreatedPullInvariantError || error instanceof CommitMismatchError)) {
+            (error instanceof CommitMismatchError ||
+              (error instanceof CreatedPullInvariantError && created.draft))) {
             if (error instanceof CommitMismatchError &&
               !await store.markRetryableClosure(operation.id, createdPullNumber)) {
               throw new Error("Could not fence stale-base pull request cleanup");
