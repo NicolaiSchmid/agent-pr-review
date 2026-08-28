@@ -180,8 +180,7 @@ export default defineTool({
             "GET", `${root}/pulls/${createdPullNumber}`, undefined, false,
           );
           if (created.state === "open" &&
-            (error instanceof CommitMismatchError ||
-              (error instanceof CreatedPullInvariantError && created.draft))) {
+            error instanceof CommitMismatchError) {
             if (error instanceof CommitMismatchError &&
               !await store.markRetryableClosure(operation.id, createdPullNumber)) {
               throw new Error("Could not fence stale-base pull request cleanup");

@@ -15,6 +15,7 @@ interface DeferredCiTask {
   github_installation_id: string | null;
   pull_request_number: number;
   lease_token: string;
+  result_comment_id?: number | null;
 }
 
 type TargetCiTask = Omit<DeferredCiTask, "lease_token">;
@@ -25,6 +26,7 @@ type CompletedCiTask = TargetCiTask & {
 
 type CleanupCiTask = TargetCiTask & {
   result_state: "reopened" | "superseded" | "cancelled";
+  result_comment_id: number | null;
 };
 
 const release = async (taskId: string, leaseToken: string) => {
@@ -73,7 +75,20 @@ const cleanupStaleResult = async (
 ) => {
   const token = await githubToken(task);
   const marker = `<!-- eve-ci-result:${task.id} -->`;
-  for (let page = 1; ; page += 1) {
+  const updateComment = (commentId: number) => fetch(
+    `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/issues/comments/${commentId}`,
+    {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "content-type": "application/json", "user-agent": "eve-engineering-agent" },
+      body: JSON.stringify({ body: `${reason}\n\n${marker}` }),
+    },
+  );
+  if (task.result_comment_id) {
+    const update = await updateComment(task.result_comment_id);
+    if (update.ok) return;
+    if (update.status !== 404) throw new Error(`Could not supersede stale CI result: ${update.status}`);
+  }
+  for (let page = 1; page <= 30; page += 1) {
     const response = await fetch(
       `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/issues/${task.pull_request_number}/comments?per_page=100&page=${page}`,
       { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
@@ -93,14 +108,7 @@ const cleanupStaleResult = async (
       return owned && comment.body?.includes(marker);
     });
     if (existing) {
-      const update = await fetch(
-        `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/issues/comments/${existing.id}`,
-        {
-          method: "PATCH",
-          headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "content-type": "application/json", "user-agent": "eve-engineering-agent" },
-          body: JSON.stringify({ body: `${reason}\n\n${marker}` }),
-        },
-      );
+      const update = await updateComment(existing.id);
       if (!update.ok) throw new Error(`Could not supersede stale CI result: ${update.status}`);
       return;
     }
@@ -202,9 +210,13 @@ export default defineSchedule({
                     ? "CI result superseded because the pull request or active task changed."
                     : current.result_state === "completed"
                       ? current.body ?? `Host-verified CI outcome: ${(current.conclusion ?? "success").toUpperCase()}.`
+                      : current.result_state === "publishing" && current.body
+                        ? current.body
                     : "CI was rerun for this commit; the result is pending revalidation.",
               );
-              if (current.result_state !== "completed") {
+              if (current.result_state === "reopened" ||
+                current.result_state === "superseded" ||
+                current.result_state === "cancelled") {
                 await store.acknowledgeRerunCleanup(task.id, current.result_state);
               }
             }
