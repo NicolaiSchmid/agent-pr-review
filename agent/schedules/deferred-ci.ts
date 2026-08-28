@@ -189,7 +189,16 @@ export default defineSchedule({
       (async () => {
         const pendingCleanup = await store.claimRerunCleanup<CleanupCiTask[]>(25);
         await Promise.allSettled(pendingCleanup.map(async (task) => {
-          const repository = await resolveRepository(task);
+          let repository;
+          try {
+            repository = await resolveRepository(task);
+          } catch (error) {
+            if (error instanceof PermanentTargetError) {
+              await store.retireTask(task.id);
+              return;
+            }
+            throw error;
+          }
           await cleanupStaleResult(
             task, repository,
             task.result_state === "cancelled"

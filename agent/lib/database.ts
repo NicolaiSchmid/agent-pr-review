@@ -69,6 +69,7 @@ export const store = {
   acknowledgeRerunCleanup: (taskId: string, expectedResultState: "reopened" | "superseded" | "cancelled") => convex().mutation(mutation("acknowledgeRerunCleanup"), args({ taskId, expectedResultState })) as Promise<boolean>,
   rerunDisposition: (taskId: string) => convex().query(query("rerunDisposition"), args({ taskId })) as Promise<{ result_state: "reopened" | "superseded" | "cancelled" | "completed" | "publishing"; conclusion: "success" | "failure" | null; body: string | null } | null>,
   supersedeCompleted: (taskId: string) => convex().mutation(mutation("supersedeCompleted"), args({ taskId })),
+  retireTask: (taskId: string) => convex().mutation(mutation("retireTask"), args({ taskId })),
   cancelPullTasks: (repositoryId: string, pullRequestNumber: number) => convex().mutation(mutation("cancelPullTasks"), args({ repositoryId, pullRequestNumber })),
   claimWaiting: <T>(repositoryId: string, headSha: string, pullRequestNumbers: number[]) => convex().mutation(mutation("claimWaiting"), args({ repositoryId, headSha, pullRequestNumbers })) as Promise<T>,
   supersedeOldHeads: <T>(repositoryId: string, pullRequestNumber: number, headSha: string) => convex().mutation(mutation("supersedeOldHeads"), args({ repositoryId, pullRequestNumber, headSha })) as Promise<T>,

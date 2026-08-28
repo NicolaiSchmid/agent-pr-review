@@ -425,6 +425,7 @@ export default githubChannel({
       const completed: Array<{
         id: string; pull_request_number: number;
         result_state: "reopened" | "superseded" | "cancelled";
+        result_comment_id: number | null;
       }> = [];
       for (const pullRequestNumber of pullRequestNumbers) {
         const pull = await ctx.github.request<{
@@ -445,7 +446,7 @@ export default githubChannel({
       for (let cleanupIndex = 0; cleanupIndex < completed.length; cleanupIndex += 1) {
         const task = completed[cleanupIndex]!;
         const marker = `<!-- eve-ci-result:${task.id} -->`;
-        let commentId: number | undefined;
+        let commentId: number | undefined = task.result_comment_id ?? undefined;
         for (let page = 1; !commentId && page <= 30; page += 1) {
           const comments = await ctx.github.request<Array<{
             id: number; body?: string; user?: { login?: string; type?: string };
@@ -551,13 +552,13 @@ export default githubChannel({
   },
   onPullRequest: async (ctx, pullRequest) => {
     if (!pullRequest.headSha || pullRequest.action !== "synchronize") return null;
-    const completed = await store.supersedeOldHeads<Array<{ id: string; head_sha: string }>>(
+    const completed = await store.supersedeOldHeads<Array<{ id: string; head_sha: string; result_comment_id: number | null }>>(
       String(ctx.repository.id), pullRequest.pullRequestNumber, pullRequest.headSha.toLowerCase(),
     );
     for (const task of completed) {
       const marker = `<!-- eve-ci-result:${task.id} -->`;
-      let commentId: number | undefined;
-      for (let page = 1; !commentId; page += 1) {
+      let commentId: number | undefined = task.result_comment_id ?? undefined;
+      for (let page = 1; !commentId && page <= 30; page += 1) {
         const comments = await ctx.github.request<Array<{
           id: number; body?: string; user?: { login?: string; type?: string };
         }>>({
