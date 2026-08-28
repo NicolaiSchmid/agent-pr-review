@@ -17,7 +17,15 @@ interface DeferredCiTask {
   lease_token: string;
 }
 
-type CompletedCiTask = Omit<DeferredCiTask, "lease_token">;
+type TargetCiTask = Omit<DeferredCiTask, "lease_token">;
+
+type CompletedCiTask = TargetCiTask & {
+  ci_conclusion: "success" | "failure" | null;
+};
+
+type CleanupCiTask = TargetCiTask & {
+  result_state: "reopened" | "superseded" | "cancelled";
+};
 
 const release = async (taskId: string, leaseToken: string) => {
   await store.settleLease(taskId, leaseToken, "waiting_for_ci");
@@ -31,7 +39,7 @@ const cancel = async (taskId: string, leaseToken: string) => {
   await store.settleLease(taskId, leaseToken, "cancelled");
 };
 
-const githubToken = async (task: DeferredCiTask) => {
+const githubToken = async (task: TargetCiTask) => {
   const credentials = connectGitHubCredentials(env.githubConnector, {
     ...(task.github_installation_id ? { installationId: task.github_installation_id } : {}),
   });
@@ -40,7 +48,7 @@ const githubToken = async (task: DeferredCiTask) => {
   return typeof source === "function" ? await source() : source;
 };
 
-const resolveRepository = async (task: DeferredCiTask) => {
+const resolveRepository = async (task: TargetCiTask) => {
   const token = await githubToken(task);
   const response = await fetch(`${env.githubApiUrl.replace(/\/+$/, "")}/repositories/${task.repository_id}`, {
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" },
@@ -59,7 +67,7 @@ const resolveRepository = async (task: DeferredCiTask) => {
 };
 
 const cleanupStaleResult = async (
-  task: DeferredCiTask,
+  task: TargetCiTask,
   repository: { owner: string; repo: string },
   reason = "CI result superseded by a newer pull-request head.",
 ) => {
@@ -101,7 +109,7 @@ const cleanupStaleResult = async (
 };
 
 const currentPullRequestHead = async (
-  task: DeferredCiTask,
+  task: TargetCiTask,
   repository: { owner: string; repo: string },
 ) => {
   const token = await githubToken(task);
@@ -123,30 +131,39 @@ const currentCiIsTerminal = async (
   task: CompletedCiTask,
   repository: { owner: string; repo: string },
 ) => {
-  const token = await githubToken(task as DeferredCiTask);
+  const token = await githubToken(task);
   const root = `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/commits/${task.head_sha}`;
   const headers = { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" };
-  const [checksResponse, statusesResponse] = await Promise.all([
-    fetch(`${root}/check-runs?per_page=100`, { headers }),
-    fetch(`${root}/status?per_page=100`, { headers }),
-  ]);
-  if (!checksResponse.ok || !statusesResponse.ok) {
-    throw new Error(`Could not revalidate completed CI: ${checksResponse.status}/${statusesResponse.status}`);
+  const checks: Array<{ status: string; conclusion: string | null }> = [];
+  const statuses: Array<{ state: string }> = [];
+  let checkTotal = 0;
+  let statusTotal = 0;
+  for (let page = 1; page <= 30; page += 1) {
+    const response = await fetch(`${root}/check-runs?per_page=100&page=${page}`, { headers });
+    if (!response.ok) throw new Error(`Could not revalidate completed Check Runs: ${response.status}`);
+    const body = await response.json() as { total_count: number; check_runs: typeof checks };
+    checkTotal = body.total_count;
+    checks.push(...body.check_runs);
+    if (checks.length >= checkTotal || body.check_runs.length < 100) break;
   }
-  const checks = await checksResponse.json() as {
-    total_count: number;
-    check_runs: Array<{ status: string; conclusion: string | null }>;
-  };
-  const statuses = await statusesResponse.json() as {
-    total_count: number;
-    statuses: Array<{ state: string }>;
-  };
-  if (checks.check_runs.length < checks.total_count || statuses.statuses.length < statuses.total_count) {
-    throw new Error("Completed CI revalidation exceeded its 100-context bound");
+  for (let page = 1; page <= 30; page += 1) {
+    const response = await fetch(`${root}/status?per_page=100&page=${page}`, { headers });
+    if (!response.ok) throw new Error(`Could not revalidate completed commit statuses: ${response.status}`);
+    const body = await response.json() as { total_count: number; statuses: typeof statuses };
+    statusTotal = body.total_count;
+    statuses.push(...body.statuses);
+    if (statuses.length >= statusTotal || body.statuses.length < 100) break;
   }
-  return checks.total_count + statuses.total_count > 0 &&
-    checks.check_runs.every((check) => check.status === "completed" && check.conclusion !== null) &&
-    statuses.statuses.every((status) => status.state !== "pending");
+  if (checks.length < checkTotal || statuses.length < statusTotal) {
+    throw new Error("Completed CI revalidation exceeded its 3000-context bound");
+  }
+  const terminal = checkTotal + statusTotal > 0 &&
+    checks.every((check) => check.status === "completed" && check.conclusion !== null) &&
+    statuses.every((status) => status.state !== "pending");
+  const failed = checks.some((check) => check.conclusion !== null &&
+    !["success", "neutral", "skipped"].includes(check.conclusion)) ||
+    statuses.some((status) => status.state !== "pending" && status.state !== "success");
+  return { terminal, conclusion: failed ? "failure" as const : "success" as const };
 };
 
 const drainSession = async (stream: ReadableStream<unknown>): Promise<void> => {
@@ -162,16 +179,33 @@ export default defineSchedule({
   run({ receive, waitUntil, appAuth }) {
     waitUntil(
       (async () => {
+        const pendingCleanup = await store.claimRerunCleanup<CleanupCiTask[]>(25);
+        await Promise.allSettled(pendingCleanup.map(async (task) => {
+          const repository = await resolveRepository(task);
+          await cleanupStaleResult(
+            task, repository,
+            task.result_state === "cancelled"
+              ? "CI result finalized because the pull request is no longer open."
+              : task.result_state === "superseded"
+                ? "CI result superseded because the pull request or active task changed."
+                : "CI was rerun for this commit; the result is pending revalidation.",
+          );
+          await store.acknowledgeRerunCleanup(task.id, task.result_state);
+        }));
+
         const completed = await store.claimCompletedForRevalidation<CompletedCiTask[]>(25);
         await Promise.allSettled(completed.map(async (task) => {
-          const repository = await resolveRepository(task as DeferredCiTask);
-          const pull = await currentPullRequestHead(task as DeferredCiTask, repository);
+          const repository = await resolveRepository(task);
+          const pull = await currentPullRequestHead(task, repository);
           const disposition = !pull.open
             ? "cancelled" as const
             : pull.headSha !== task.head_sha.toLowerCase()
               ? "superseded" as const
               : "valid" as const;
-          if (disposition === "valid" && await currentCiIsTerminal(task, repository)) return;
+          const ci = disposition === "valid"
+            ? await currentCiIsTerminal(task, repository)
+            : null;
+          if (ci?.terminal && task.ci_conclusion === ci.conclusion) return;
           await store.holdRerun(task.repository_id, task.head_sha);
           const cleanup = await store.resolveRerunPull<Array<{
             id: string; pull_request_number: number;
@@ -183,7 +217,6 @@ export default defineSchedule({
                 ...task,
                 id: item.id,
                 pull_request_number: item.pull_request_number,
-                lease_token: "revalidation",
               },
               repository,
               item.result_state === "cancelled"

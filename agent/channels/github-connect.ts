@@ -358,12 +358,14 @@ export default githubChannel({
         const stillCurrent = await canPublishCiTask(channel, claim.taskId, claim.leaseToken);
         const finalCi = await hostCiStatus(channel, channel.state.headSha);
         const stillTerminal = finalCi.terminal && finalCi.conclusion === publicationCi.conclusion;
-        const completed = stillCurrent && stillTerminal && await transitionCiTask(
-          String(channel.state.repositoryId), channel.state.pullRequestNumber,
-          channel.state.headSha, "publishing",
-          "completed",
-          claim.taskId, claim.leaseToken,
-        );
+        const completed = stillCurrent && stillTerminal && await store.completeCiTask({
+          repositoryId: String(channel.state.repositoryId),
+          pullRequestNumber: channel.state.pullRequestNumber,
+          headSha: channel.state.headSha,
+          taskId: claim.taskId,
+          leaseToken: claim.leaseToken,
+          conclusion: finalCi.conclusion,
+        });
         if (!completed) {
           await compensatePublishedComment(
             `${stillCurrent && !stillTerminal ? "CI returned to a pending state" : "CI result superseded"} before publication completed.`,
