@@ -35,6 +35,8 @@ export default defineSchema({
     rerunCleanupPending: v.optional(v.boolean()),
     rerunResultState: v.optional(v.union(v.literal("reopened"), v.literal("superseded"), v.literal("cancelled"))),
     ciConclusion: v.optional(v.union(v.literal("success"), v.literal("failure"))),
+    resultCommentId: v.optional(v.number()), resultPostClaim: v.optional(v.string()),
+    resultPostClaimAt: v.optional(v.number()),
     deadlineAt: v.optional(v.number()), updatedAt: v.number(),
   }).index("by_external_id", ["externalId"])
     .index("by_conversation_head_key", ["conversationHead"])

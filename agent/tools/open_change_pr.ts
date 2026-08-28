@@ -69,7 +69,7 @@ export default defineTool({
     }
     class CommitMismatchError extends Error {}
     class CreatedPullInvariantError extends Error {}
-    const request = async <T = Record<string, unknown>>(method: string, path: string, body?: unknown) => {
+    const request = async <T = Record<string, unknown>>(method: string, path: string, body?: unknown, cancellable = true) => {
       const response = await fetch(`${env.githubApiUrl.replace(/\/+$/, "")}${path}`, {
         method,
         headers: {
@@ -80,7 +80,7 @@ export default defineTool({
           "x-github-api-version": "2022-11-28",
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: ctx.abortSignal,
+        ...(cancellable ? { signal: ctx.abortSignal } : {}),
       });
       if (!response.ok) {
         if (response.status === 401) ctx.requireAuth(githubAuth);
@@ -102,12 +102,14 @@ export default defineTool({
       title: string;
       body: string | null;
     };
-    const listPulls = async (baseBranch?: string) => {
+    const listPulls = async (baseBranch?: string, cancellable = true) => {
       const pulls: ListedPull[] = [];
       for (let page = 1; ; page += 1) {
         const batch = await request<ListedPull[]>(
           "GET",
           `${root}/pulls?state=open&head=${encodeURIComponent(`${input.owner}:${activeBranch}`)}${baseBranch ? `&base=${encodeURIComponent(baseBranch)}` : ""}&per_page=100&page=${page}`,
+          undefined,
+          cancellable,
         );
         pulls.push(...batch);
         if (batch.length < 100) return pulls;
@@ -141,11 +143,11 @@ export default defineTool({
             try {
               await claimOperationPull(pull.number);
             } catch {
-              await request("PATCH", `${root}/pulls/${pull.number}`, { state: "closed" });
+              await request("PATCH", `${root}/pulls/${pull.number}`, { state: "closed" }, false);
               throw error;
             }
           } else {
-            await request("PATCH", `${root}/pulls/${pull.number}`, { state: "closed" });
+            await request("PATCH", `${root}/pulls/${pull.number}`, { state: "closed" }, false);
             throw error;
           }
         }
@@ -175,7 +177,7 @@ export default defineTool({
       } catch (error) {
         if (createdPullNumber) {
           const created = await request<{ head: { sha: string }; state: string }>(
-            "GET", `${root}/pulls/${createdPullNumber}`,
+            "GET", `${root}/pulls/${createdPullNumber}`, undefined, false,
           );
           if (created.state === "open" &&
             (error instanceof CreatedPullInvariantError || error instanceof CommitMismatchError)) {
@@ -183,27 +185,24 @@ export default defineTool({
               !await store.markRetryableClosure(operation.id, createdPullNumber)) {
               throw new Error("Could not fence stale-base pull request cleanup");
             }
-            await request("PATCH", `${root}/pulls/${createdPullNumber}`, { state: "closed" });
+            await request("PATCH", `${root}/pulls/${createdPullNumber}`, { state: "closed" }, false);
             if (error instanceof CommitMismatchError) {
               await releaseOperationPull(createdPullNumber);
             }
           }
           throw error;
         }
-        const recoveryPulls = await listPulls();
+        const recoveryPulls = await listPulls(undefined, false);
         const recovered = recoveryPulls.find((candidate) =>
           (candidate.body ?? "") === operationBody
         ) ?? recoveryPulls[0];
         if (recovered) {
           if (!recovered.draft) {
-            if (operation.pull_request_number === recovered.number) {
-              await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
-            }
             throw new Error("Refusing to recover a pull request that is no longer a draft");
           }
           if (recovered.title !== input.title || (recovered.body ?? "") !== operationBody) {
             if (operation.pull_request_number === recovered.number) {
-              await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
+              await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" }, false);
             }
             throw new Error("Refusing to recover a pull request with different title or body");
           }
@@ -219,7 +218,7 @@ export default defineTool({
                 !await store.markRetryableClosure(operation.id, recovered.number)) {
                 throw new Error("Could not fence stale-base pull request cleanup");
               }
-              await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
+              await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" }, false);
               if (validationError instanceof CommitMismatchError) {
                 await releaseOperationPull(recovered.number);
               }
@@ -418,14 +417,11 @@ export default defineTool({
     }
     if (alreadyOpen) {
       if (!alreadyOpen.draft) {
-        if (operation.pull_request_number === alreadyOpen.number) {
-          await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
-        }
         throw new Error("Refusing to recover a pull request that is no longer a draft");
       }
       if (alreadyOpen.title !== input.title || (alreadyOpen.body ?? "") !== operationBody) {
         if (operation.pull_request_number === alreadyOpen.number) {
-          await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
+          await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" }, false);
         }
         throw new Error("Refusing to recover a pull request with different title or body");
       }
@@ -441,7 +437,7 @@ export default defineTool({
             !await store.markRetryableClosure(operation.id, alreadyOpen.number)) {
             throw new Error("Could not fence stale-base pull request cleanup");
           }
-          await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
+          await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" }, false);
           if (validationError instanceof CommitMismatchError) {
             await releaseOperationPull(alreadyOpen.number);
           }

@@ -190,7 +190,21 @@ export default defineSchedule({
                 ? "CI result superseded because the pull request or active task changed."
                 : "CI was rerun for this commit; the result is pending revalidation.",
           );
-          await store.acknowledgeRerunCleanup(task.id, task.result_state);
+          const acknowledged = await store.acknowledgeRerunCleanup(task.id, task.result_state);
+          if (!acknowledged) {
+            const current = await store.rerunDisposition(task.id);
+            if (current && current !== task.result_state) {
+              await cleanupStaleResult(
+                task, repository,
+                current === "cancelled"
+                  ? "CI result finalized because the pull request is no longer open."
+                  : current === "superseded"
+                    ? "CI result superseded because the pull request or active task changed."
+                    : "CI was rerun for this commit; the result is pending revalidation.",
+              );
+              await store.acknowledgeRerunCleanup(task.id, current);
+            }
+          }
         }));
 
         const completed = await store.claimCompletedForRevalidation<CompletedCiTask[]>(25);

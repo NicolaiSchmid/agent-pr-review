@@ -321,19 +321,6 @@ export default githubChannel({
         const suffix = `\n\n${marker}`;
         const available = 60_000 - prefix.length - continuationLabel.length - suffix.length;
         const body = `${prefix}${continuationLabel}${continuation.slice(0, Math.max(0, available))}${suffix}`;
-        let existingCommentId: number | undefined;
-        for (let page = 1; !existingCommentId; page += 1) {
-          const comments = await channel.github.request<Array<{
-            id: number; body?: string; user?: { login?: string; type?: string };
-          }>>({
-            method: "GET",
-            path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/${channel.state.pullRequestNumber}/comments?per_page=100&page=${page}`,
-          });
-          existingCommentId = comments.body.find(
-            (comment) => isAgentBot(comment.user) && comment.body?.includes(marker),
-          )?.id;
-          if (comments.body.length < 100) break;
-        }
         const immediateCi = await hostCiStatus(channel, channel.state.headSha);
         if (
           !await canPublishCiTask(channel, claim.taskId, claim.leaseToken) ||
@@ -346,14 +333,33 @@ export default githubChannel({
           );
           return;
         }
+        const postClaim = await store.claimResultPost<{
+          claimed: boolean; comment_id: number | null;
+        }>(claim.taskId, claim.leaseToken);
+        if (!postClaim.claimed) return;
+        let existingCommentId: number | undefined = postClaim.comment_id ?? undefined;
+        for (let page = 1; !existingCommentId; page += 1) {
+          const comments = await channel.github.request<Array<{
+            id: number; body?: string; user?: { login?: string; type?: string };
+          }>>({
+            method: "GET",
+            path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/${channel.state.pullRequestNumber}/comments?per_page=100&page=${page}`,
+          });
+          existingCommentId = comments.body.find(
+            (comment) => isAgentBot(comment.user) && comment.body?.includes(marker),
+          )?.id;
+          if (comments.body.length < 100) break;
+        }
         if (existingCommentId) {
           await channel.github.request({
             method: "PATCH",
             path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${existingCommentId}`,
             body: { body },
           });
+          await store.recordResultComment(claim.taskId, claim.leaseToken, existingCommentId);
         } else {
-          await channel.thread.post(body);
+          const posted = await channel.thread.post(body);
+          await store.recordResultComment(claim.taskId, claim.leaseToken, posted.id);
         }
         const stillCurrent = await canPublishCiTask(channel, claim.taskId, claim.leaseToken);
         const finalCi = await hostCiStatus(channel, channel.state.headSha);
