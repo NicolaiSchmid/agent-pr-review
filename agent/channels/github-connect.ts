@@ -351,12 +351,21 @@ export default githubChannel({
           if (comments.body.length < 100) break;
         }
         if (existingCommentId) {
-          await channel.github.request({
-            method: "PATCH",
-            path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${existingCommentId}`,
-            body: { body },
-          });
-          await store.recordResultComment(claim.taskId, claim.leaseToken, existingCommentId);
+          try {
+            await channel.github.request({
+              method: "PATCH",
+              path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${existingCommentId}`,
+              body: { body },
+            });
+            await store.recordResultComment(claim.taskId, claim.leaseToken, existingCommentId);
+          } catch (error) {
+            if ((error as { status?: number }).status !== 404 ||
+              !await store.replaceMissingResultComment(
+                claim.taskId, claim.leaseToken, existingCommentId,
+              )) throw error;
+            const posted = await channel.thread.post(body);
+            await store.recordResultComment(claim.taskId, claim.leaseToken, posted.id);
+          }
         } else {
           const posted = await channel.thread.post(body);
           await store.recordResultComment(claim.taskId, claim.leaseToken, posted.id);
