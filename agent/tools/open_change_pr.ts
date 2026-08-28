@@ -137,10 +137,15 @@ export default defineTool({
           }
           if (binding === pull.number) {
             operation.pull_request_number = pull.number;
-          } else {
-            if (binding !== null) {
+          } else if (binding === null) {
+            try {
+              await claimOperationPull(pull.number);
+            } catch {
               await request("PATCH", `${root}/pulls/${pull.number}`, { state: "closed" });
+              throw error;
             }
+          } else {
+            await request("PATCH", `${root}/pulls/${pull.number}`, { state: "closed" });
             throw error;
           }
         }

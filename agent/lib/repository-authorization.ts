@@ -23,10 +23,7 @@ const githubLoginFor = async (ctx: SessionContext, owner: string): Promise<strin
   if (auth.principalType !== "user") return null;
   const identity = await store.githubIdentity<{
     provider_user_id: string; provider_login: string | null;
-  } | null>(auth.principalId, [
-    owner.toLowerCase(),
-    ...(typeof auth.attributes.installation_id === "string" ? [auth.attributes.installation_id] : []),
-  ]);
+  } | null>(auth.principalId, [owner.toLowerCase()]);
   if (!identity) return null;
   return /^\d+$/.test(identity.provider_user_id)
     ? identity.provider_user_id
