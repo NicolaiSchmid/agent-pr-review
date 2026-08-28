@@ -398,7 +398,7 @@ export default githubChannel({
   onCheckSuite: async (ctx, suite) => {
     if ((suite.action === "requested" || suite.action === "rerequested") && suite.headSha) {
       const completed = await store.rerun<Array<{
-        id: string; pull_request_number: number; has_active: boolean;
+        id: string; pull_request_number: number; result_state: "reopened" | "superseded";
       }>>(String(ctx.repository.id), suite.headSha.toLowerCase());
       for (const task of completed) {
         const marker = `<!-- eve-ci-result:${task.id} -->`;
@@ -419,10 +419,12 @@ export default githubChannel({
           await ctx.github.request({
             method: "PATCH",
             path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/issues/comments/${commentId}`,
-            body: { body: `CI was rerun for this commit; the previous result is invalid and pending reconciliation.\n\n${marker}` },
+            body: { body: `${task.result_state === "superseded"
+              ? "CI result superseded by another active task for this commit."
+              : "CI was rerun for this commit; the result is pending revalidation."}\n\n${marker}` },
           });
         }
-        await store.finalizeRerun(task.id);
+        await store.acknowledgeRerunCleanup(task.id);
       }
       return null;
     }

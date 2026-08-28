@@ -29,6 +29,8 @@ export default defineSchema({
     kind: v.union(v.literal("pr_review"), v.literal("change_request"), v.literal("memory"), v.literal("question")),
     state: taskState, requestedBy: v.optional(v.string()), repositoryId: v.optional(v.string()),
     headSha: v.optional(v.string()), leaseToken: v.optional(v.string()),
+    rerunCleanupPending: v.optional(v.boolean()),
+    rerunResultState: v.optional(v.union(v.literal("reopened"), v.literal("superseded"))),
     deadlineAt: v.optional(v.number()), updatedAt: v.number(),
   }).index("by_external_id", ["externalId"])
     .index("by_conversation_head", ["conversationId", "headSha"])
@@ -44,12 +46,13 @@ export default defineSchema({
   memoryRecords: defineTable({
     externalId: v.string(),
     scopeKind: v.union(v.literal("user"), v.literal("organization"), v.literal("repository"), v.literal("pull_request")),
-    scopeKey: v.string(), content: v.string(), tags: v.array(v.string()),
+    scopeKey: v.string(), scopeStatus: v.string(), content: v.string(), tags: v.array(v.string()),
     sourceUrl: v.optional(v.string()), authorPrincipalId: v.string(),
     status: v.union(v.literal("proposed"), v.literal("confirmed"), v.literal("superseded")),
     expiresAt: v.optional(v.number()), updatedAt: v.number(),
   }).index("by_external_id", ["externalId"])
-    .index("by_scope_status", ["scopeKey", "status"]),
+    .index("by_scope_status", ["scopeKey", "status"])
+    .searchIndex("search_content", { searchField: "content", filterFields: ["scopeStatus"] }),
   approvalRequests: defineTable({
     externalId: v.string(), taskId: v.string(), capability: v.string(),
     requestedFrom: v.optional(v.string()), decision: v.optional(v.union(v.literal("approved"), v.literal("denied"))),
