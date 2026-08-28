@@ -13,6 +13,10 @@ const isAgentBot = (user: { login?: string; type?: string } | undefined) => {
   return user.type === "Bot" && (login === env.agentBotName.toLowerCase() ||
     login === `${env.agentBotName.toLowerCase()}[bot]`);
 };
+const sanitizeReservedMarkers = (message: string) => message.replace(
+  /<!--\s*eve-(?:ci-result|reply|change-operation):[^>]*-->/gi,
+  "",
+);
 
 const transitionCiTask = async (
   repositoryId: string,
@@ -172,10 +176,7 @@ export default githubChannel({
       const claim = trustedCiClaim(ctx);
       if (!claim) {
         if (!data.message) return;
-        const safeMessage = data.message.replace(
-          /<!--\s*eve-(?:ci-result|reply|change-operation):[^>]*-->/gi,
-          "",
-        );
+        const safeMessage = sanitizeReservedMarkers(data.message);
         const marker = `<!-- eve-reply:${ctx.session.id}:${ctx.session.turn.id} -->`;
         const truncated = safeMessage.length + marker.length + 2 > 60_000;
         const suffix = `${truncated ? "\n\n_Output truncated to fit one GitHub comment._" : ""}\n\n${marker}`;
@@ -309,10 +310,10 @@ export default githubChannel({
           );
           return;
         }
-        const continuation = data.message.replace(
+        const continuation = sanitizeReservedMarkers(data.message.replace(
           /(?:^|\n)CI_TASK_ID:\s*\S+\s*\nCI_LEASE_ID:\s*\S+\s*\nCI_TASK_STATE:\s*(?:pending|terminal)\s*$/i,
           "",
-        ).trim();
+        )).trim();
         const prefix = `Host-verified CI outcome: ${publicationCi.conclusion.toUpperCase()}.`;
         const continuationLabel = continuation
           ? "\n\nContinuation output (the host verdict above is authoritative):\n\n"
@@ -401,9 +402,29 @@ export default githubChannel({
   },
   onCheckSuite: async (ctx, suite) => {
     if ((suite.action === "requested" || suite.action === "rerequested") && suite.headSha) {
-      const completed = await store.rerun<Array<{
-        id: string; pull_request_number: number; result_state: "reopened" | "superseded";
-      }>>(String(ctx.repository.id), suite.headSha.toLowerCase());
+      const repositoryId = String(ctx.repository.id);
+      const headSha = suite.headSha.toLowerCase();
+      const pullRequestNumbers = await store.holdRerun<number[]>(repositoryId, headSha);
+      const completed: Array<{
+        id: string; pull_request_number: number;
+        result_state: "reopened" | "superseded" | "cancelled";
+      }> = [];
+      for (const pullRequestNumber of pullRequestNumbers) {
+        const pull = await ctx.github.request<{
+          head: { sha: string }; merged: boolean; state: string;
+        }>({
+          method: "GET",
+          path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/pulls/${pullRequestNumber}`,
+        });
+        const disposition = pull.body.state !== "open" || pull.body.merged
+          ? "cancelled" as const
+          : pull.body.head.sha.toLowerCase() !== headSha
+            ? "superseded" as const
+            : "valid" as const;
+        completed.push(...await store.resolveRerunPull<typeof completed>(
+          repositoryId, pullRequestNumber, headSha, disposition,
+        ));
+      }
       for (const task of completed) {
         const marker = `<!-- eve-ci-result:${task.id} -->`;
         let commentId: number | undefined;
@@ -423,9 +444,11 @@ export default githubChannel({
           await ctx.github.request({
             method: "PATCH",
             path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/issues/comments/${commentId}`,
-            body: { body: `${task.result_state === "superseded"
-              ? "CI result superseded by another active task for this commit."
-              : "CI was rerun for this commit; the result is pending revalidation."}\n\n${marker}` },
+            body: { body: `${task.result_state === "cancelled"
+              ? "CI result finalized because the pull request is no longer open."
+              : task.result_state === "superseded"
+                ? "CI result superseded because the pull request or active task changed."
+                : "CI was rerun for this commit; the result is pending revalidation."}\n\n${marker}` },
           });
         }
         await store.acknowledgeRerunCleanup(task.id);

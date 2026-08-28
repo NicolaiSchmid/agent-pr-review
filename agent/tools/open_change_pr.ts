@@ -174,6 +174,10 @@ export default defineTool({
           );
           if (created.state === "open" &&
             (error instanceof CreatedPullInvariantError || error instanceof CommitMismatchError)) {
+            if (error instanceof CommitMismatchError &&
+              !await store.markRetryableClosure(operation.id, createdPullNumber)) {
+              throw new Error("Could not fence stale-base pull request cleanup");
+            }
             await request("PATCH", `${root}/pulls/${createdPullNumber}`, { state: "closed" });
             if (error instanceof CommitMismatchError) {
               await releaseOperationPull(createdPullNumber);
@@ -206,6 +210,10 @@ export default defineTool({
           } catch (validationError) {
             if ((validationError instanceof CommitMismatchError ||
               validationError instanceof CreatedPullInvariantError) && operationOwnsPull(recovered)) {
+              if (validationError instanceof CommitMismatchError &&
+                !await store.markRetryableClosure(operation.id, recovered.number)) {
+                throw new Error("Could not fence stale-base pull request cleanup");
+              }
               await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
               if (validationError instanceof CommitMismatchError) {
                 await releaseOperationPull(recovered.number);
@@ -241,7 +249,7 @@ export default defineTool({
       files: input.files,
     })).digest("hex");
     const operation = await store.getOrCreateOperation<{
-      id: string; pull_request_number: number | null;
+      id: string; pull_request_number: number | null; retryable_closure: boolean;
     }>({
       externalId: randomUUID(), requestFingerprint: operationFingerprint,
       repositoryOwner: input.owner.toLowerCase(), repositoryName: input.repo.toLowerCase(),
@@ -255,12 +263,14 @@ export default defineTool({
       const claimed = await store.claimOperationPull(operation.id, number);
       if (!claimed) throw new Error("Change operation is already bound to another pull request");
       operation.pull_request_number = number;
+      operation.retryable_closure = false;
     };
     const releaseOperationPull = async (number: number) => {
       if (!await store.releaseOperationPull(operation.id, number)) {
         throw new Error("Change operation binding changed before retry cleanup completed");
       }
       operation.pull_request_number = null;
+      operation.retryable_closure = false;
     };
     const fingerprintFor = (baseSha: string) => createHash("sha256").update(JSON.stringify({
       owner: input.owner.toLowerCase(),
@@ -392,7 +402,7 @@ export default defineTool({
         }>("GET", `${root}/pulls/${operation.pull_request_number}`);
     if (alreadyOpen) {
       if ("state" in alreadyOpen && alreadyOpen.state !== "open") {
-        if ((alreadyOpen.body ?? "") !== operationBody) {
+        if (!operation.retryable_closure || (alreadyOpen.body ?? "") !== operationBody) {
           throw new Error("The operation-bound pull request is no longer open");
         }
         await approvedCommitBase(alreadyOpen.head.sha);
@@ -421,6 +431,10 @@ export default defineTool({
       } catch (validationError) {
         if ((validationError instanceof CommitMismatchError ||
           validationError instanceof CreatedPullInvariantError) && operationOwnsPull(alreadyOpen)) {
+          if (validationError instanceof CommitMismatchError &&
+            !await store.markRetryableClosure(operation.id, alreadyOpen.number)) {
+            throw new Error("Could not fence stale-base pull request cleanup");
+          }
           await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
           if (validationError instanceof CommitMismatchError) {
             await releaseOperationPull(alreadyOpen.number);

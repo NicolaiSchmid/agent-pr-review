@@ -30,12 +30,16 @@ export default defineSchema({
     state: taskState, requestedBy: v.optional(v.string()), repositoryId: v.optional(v.string()),
     headSha: v.optional(v.string()), leaseToken: v.optional(v.string()),
     conversationHead: v.optional(v.string()), repositoryHead: v.optional(v.string()),
+    repositoryPull: v.optional(v.string()), claimState: v.optional(v.string()),
+    rerunHold: v.optional(v.boolean()),
     rerunCleanupPending: v.optional(v.boolean()),
-    rerunResultState: v.optional(v.union(v.literal("reopened"), v.literal("superseded"))),
+    rerunResultState: v.optional(v.union(v.literal("reopened"), v.literal("superseded"), v.literal("cancelled"))),
     deadlineAt: v.optional(v.number()), updatedAt: v.number(),
   }).index("by_external_id", ["externalId"])
     .index("by_conversation_head_key", ["conversationHead"])
     .index("by_repository_head_key", ["repositoryHead"])
+    .index("by_repository_pull", ["repositoryPull"])
+    .index("by_claim_state_updated", ["claimState", "updatedAt"])
     .index("by_conversation_head", ["conversationId", "headSha"])
     .index("by_repository_head", ["repositoryId", "headSha"])
     .index("by_state_updated", ["state", "updatedAt"]),
@@ -63,7 +67,8 @@ export default defineSchema({
   }).index("by_external_id", ["externalId"]),
   changeOperations: defineTable({
     externalId: v.string(), requestFingerprint: v.string(), repositoryOwner: v.string(),
-    repositoryName: v.string(), branch: v.string(), pullRequestNumber: v.optional(v.number()), updatedAt: v.number(),
+    repositoryName: v.string(), branch: v.string(), pullRequestNumber: v.optional(v.number()),
+    retryableClosure: v.optional(v.boolean()), updatedAt: v.number(),
   }).index("by_external_id", ["externalId"])
     .index("by_request_fingerprint", ["requestFingerprint"]),
   auditEvents: defineTable({

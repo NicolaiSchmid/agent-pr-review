@@ -9,7 +9,7 @@ const allowed = {
   write: new Set(["write", "maintain", "admin", "push"]),
 } satisfies Record<RequiredPermission, Set<string>>;
 
-const githubLoginFor = async (ctx: SessionContext): Promise<string | null> => {
+const githubLoginFor = async (ctx: SessionContext, owner: string): Promise<string | null> => {
   const auth = ctx.session.auth.current;
   if (!auth) return null;
   const webhookLogin = auth.attributes.user_login;
@@ -23,7 +23,10 @@ const githubLoginFor = async (ctx: SessionContext): Promise<string | null> => {
   if (auth.principalType !== "user") return null;
   const identity = await store.githubIdentity<{
     provider_user_id: string; provider_login: string | null;
-  } | null>(auth.principalId);
+  } | null>(auth.principalId, [
+    owner.toLowerCase(),
+    ...(typeof auth.attributes.installation_id === "string" ? [auth.attributes.installation_id] : []),
+  ]);
   if (!identity) return null;
   return /^\d+$/.test(identity.provider_user_id)
     ? identity.provider_user_id
@@ -43,7 +46,7 @@ export const requireRepositoryPermission = async (
     if (typeof target === "string" && target.toLowerCase() === `${owner}/${repo}`.toLowerCase()) return;
     throw new Error("Runtime repository access is outside the claimed task target");
   }
-  let login = await githubLoginFor(ctx);
+  let login = await githubLoginFor(ctx, owner);
   if (!login) {
     throw new Error("A verified GitHub identity is required for repository access");
   }
