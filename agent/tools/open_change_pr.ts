@@ -212,16 +212,12 @@ export default defineTool({
             await assertMatchingCommit(recovered.head.sha, await liveBaseSha());
             validatedRecovered = await revalidateRecoveredPull(recovered.number, recovered.head.sha);
           } catch (validationError) {
-            if ((validationError instanceof CommitMismatchError ||
-              validationError instanceof CreatedPullInvariantError) && operationOwnsPull(recovered)) {
-              if (validationError instanceof CommitMismatchError &&
-                !await store.markRetryableClosure(operation.id, recovered.number)) {
+            if (validationError instanceof CommitMismatchError && operationOwnsPull(recovered)) {
+              if (!await store.markRetryableClosure(operation.id, recovered.number)) {
                 throw new Error("Could not fence stale-base pull request cleanup");
               }
               await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" }, false);
-              if (validationError instanceof CommitMismatchError) {
-                await releaseOperationPull(recovered.number);
-              }
+              await releaseOperationPull(recovered.number);
             }
             throw validationError;
           }
