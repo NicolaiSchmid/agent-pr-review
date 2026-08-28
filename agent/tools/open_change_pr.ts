@@ -143,8 +143,13 @@ export default defineTool({
             try {
               await claimOperationPull(pull.number);
             } catch {
-              await request("PATCH", `${root}/pulls/${pull.number}`, { state: "closed" }, false);
-              throw error;
+              const retried = await store.getOperation<{ pull_request_number: number | null } | null>(operation.id);
+              if (retried?.pull_request_number === pull.number) {
+                operation.pull_request_number = pull.number;
+              } else {
+                await request("PATCH", `${root}/pulls/${pull.number}`, { state: "closed" }, false);
+                throw error;
+              }
             }
           } else {
             await request("PATCH", `${root}/pulls/${pull.number}`, { state: "closed" }, false);
@@ -299,12 +304,41 @@ export default defineTool({
       );
       const baseTree = await request<{
         truncated: boolean;
-        tree: Array<{ path: string; mode: string; type: string }>;
+        tree: Array<{ path: string; mode: string; type: string; sha: string }>;
       }>("GET", `${root}/git/trees/${baseCommit.tree.sha}?recursive=1`);
-      if (baseTree.truncated) {
-        throw new Error("GitHub returned a truncated base tree; refusing to guess file modes");
-      }
       const entries = new Map(baseTree.tree.map((entry) => [entry.path, entry]));
+      if (baseTree.truncated) {
+        entries.clear();
+        const treeCache = new Map<string, Array<{
+          path: string; mode: string; type: string; sha: string;
+        }>>();
+        const readTree = async (sha: string) => {
+          const cached = treeCache.get(sha);
+          if (cached) return cached;
+          const tree = await request<{ truncated: boolean; tree: Array<{
+            path: string; mode: string; type: string; sha: string;
+          }> }>("GET", `${root}/git/trees/${sha}`);
+          if (tree.truncated) throw new Error("GitHub truncated a non-recursive tree");
+          treeCache.set(sha, tree.tree);
+          return tree.tree;
+        };
+        for (const file of input.files) {
+          const segments = file.path.split("/");
+          let treeSha = baseCommit.tree.sha;
+          for (let index = 0; index < segments.length; index += 1) {
+            const entry = (await readTree(treeSha)).find(
+              (candidate) => candidate.path === segments[index],
+            );
+            if (!entry) break;
+            const resolvedPath = segments.slice(0, index + 1).join("/");
+            entries.set(resolvedPath, entry);
+            if (index < segments.length - 1) {
+              if (entry.type !== "tree") break;
+              treeSha = entry.sha;
+            }
+          }
+        }
+      }
       for (const file of input.files) {
         const existing = entries.get(file.path);
         if (existing && existing.type !== "blob") {

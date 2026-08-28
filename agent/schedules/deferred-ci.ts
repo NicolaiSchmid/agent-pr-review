@@ -225,7 +225,16 @@ export default defineSchedule({
 
         const completed = await store.claimCompletedForRevalidation<CompletedCiTask[]>(25);
         await Promise.allSettled(completed.map(async (task) => {
-          const repository = await resolveRepository(task);
+          let repository;
+          try {
+            repository = await resolveRepository(task);
+          } catch (error) {
+            if (error instanceof PermanentTargetError) {
+              await store.supersedeCompleted(task.id);
+              return;
+            }
+            throw error;
+          }
           const pull = await currentPullRequestHead(task, repository);
           const disposition = !pull.open
             ? "cancelled" as const

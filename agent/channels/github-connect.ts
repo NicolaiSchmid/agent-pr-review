@@ -184,7 +184,7 @@ export default githubChannel({
         if (channel.thread.kind === "review_thread") {
           let existingCommentId: number | undefined;
           if (channel.state.pullRequestNumber) {
-            for (let page = 1; !existingCommentId; page += 1) {
+            for (let page = 1; !existingCommentId && page <= 30; page += 1) {
               const comments = await channel.github.request<Array<{
                 id: number; body?: string; user?: { login?: string; type?: string };
               }>>({
@@ -209,7 +209,7 @@ export default githubChannel({
           return;
         }
         let existingCommentId: number | undefined;
-        for (let page = 1; !existingCommentId; page += 1) {
+        for (let page = 1; !existingCommentId && page <= 30; page += 1) {
           const comments = await channel.github.request<Array<{
             id: number; body?: string; user?: { login?: string; type?: string };
           }>>({
