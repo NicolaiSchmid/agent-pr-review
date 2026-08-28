@@ -29,10 +29,13 @@ export default defineSchema({
     kind: v.union(v.literal("pr_review"), v.literal("change_request"), v.literal("memory"), v.literal("question")),
     state: taskState, requestedBy: v.optional(v.string()), repositoryId: v.optional(v.string()),
     headSha: v.optional(v.string()), leaseToken: v.optional(v.string()),
+    conversationHead: v.optional(v.string()), repositoryHead: v.optional(v.string()),
     rerunCleanupPending: v.optional(v.boolean()),
     rerunResultState: v.optional(v.union(v.literal("reopened"), v.literal("superseded"))),
     deadlineAt: v.optional(v.number()), updatedAt: v.number(),
   }).index("by_external_id", ["externalId"])
+    .index("by_conversation_head_key", ["conversationHead"])
+    .index("by_repository_head_key", ["repositoryHead"])
     .index("by_conversation_head", ["conversationId", "headSha"])
     .index("by_repository_head", ["repositoryId", "headSha"])
     .index("by_state_updated", ["state", "updatedAt"]),

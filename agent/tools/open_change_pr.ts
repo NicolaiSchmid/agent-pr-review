@@ -175,6 +175,9 @@ export default defineTool({
           if (created.state === "open" &&
             (error instanceof CreatedPullInvariantError || error instanceof CommitMismatchError)) {
             await request("PATCH", `${root}/pulls/${createdPullNumber}`, { state: "closed" });
+            if (error instanceof CommitMismatchError) {
+              await releaseOperationPull(createdPullNumber);
+            }
           }
           throw error;
         }
@@ -204,6 +207,9 @@ export default defineTool({
             if ((validationError instanceof CommitMismatchError ||
               validationError instanceof CreatedPullInvariantError) && operationOwnsPull(recovered)) {
               await request("PATCH", `${root}/pulls/${recovered.number}`, { state: "closed" });
+              if (validationError instanceof CommitMismatchError) {
+                await releaseOperationPull(recovered.number);
+              }
             }
             throw validationError;
           }
@@ -249,6 +255,12 @@ export default defineTool({
       const claimed = await store.claimOperationPull(operation.id, number);
       if (!claimed) throw new Error("Change operation is already bound to another pull request");
       operation.pull_request_number = number;
+    };
+    const releaseOperationPull = async (number: number) => {
+      if (!await store.releaseOperationPull(operation.id, number)) {
+        throw new Error("Change operation binding changed before retry cleanup completed");
+      }
+      operation.pull_request_number = null;
     };
     const fingerprintFor = (baseSha: string) => createHash("sha256").update(JSON.stringify({
       owner: input.owner.toLowerCase(),
@@ -318,7 +330,7 @@ export default defineTool({
     };
     const commitMessage = commitMessageFor(baseRef.object.sha);
     const tree = await buildExpectedTree(baseRef.object.sha);
-    const assertMatchingCommit = async (sha: string, currentBaseSha = baseRef.object.sha) => {
+    const approvedCommitBase = async (sha: string) => {
       const candidate = await request<{
         message: string;
         parents: Array<{ sha: string }>;
@@ -329,12 +341,19 @@ export default defineTool({
       if (
         !candidateBase ||
         candidate.parents.length !== 1 ||
-        candidateBase !== currentBaseSha ||
         candidate.message !== commitMessageFor(candidateBase) ||
         candidate.tree.sha !== expectedTree?.sha
       ) {
         throw new CommitMismatchError(
           `Branch ${input.branch} already exists but does not match this approved change`,
+        );
+      }
+      return candidateBase;
+    };
+    const assertMatchingCommit = async (sha: string, currentBaseSha = baseRef.object.sha) => {
+      if (await approvedCommitBase(sha) !== currentBaseSha) {
+        throw new CommitMismatchError(
+          `Branch ${input.branch} is based on a stale version of the approved base`,
         );
       }
     };
@@ -360,7 +379,7 @@ export default defineTool({
       return pull;
     };
     const openPulls = operation.pull_request_number === null ? await listPulls() : [];
-    const alreadyOpen = operation.pull_request_number === null
+    let alreadyOpen = operation.pull_request_number === null
       ? openPulls.find((pull) => (pull.body ?? "") === operationBody) ?? openPulls[0]
       : await request<{
           number: number;
@@ -373,8 +392,15 @@ export default defineTool({
         }>("GET", `${root}/pulls/${operation.pull_request_number}`);
     if (alreadyOpen) {
       if ("state" in alreadyOpen && alreadyOpen.state !== "open") {
-        throw new Error("The operation-bound pull request is no longer open");
+        if ((alreadyOpen.body ?? "") !== operationBody) {
+          throw new Error("The operation-bound pull request is no longer open");
+        }
+        await approvedCommitBase(alreadyOpen.head.sha);
+        await releaseOperationPull(alreadyOpen.number);
+        alreadyOpen = undefined;
       }
+    }
+    if (alreadyOpen) {
       if (!alreadyOpen.draft) {
         if (operation.pull_request_number === alreadyOpen.number) {
           await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
@@ -396,6 +422,9 @@ export default defineTool({
         if ((validationError instanceof CommitMismatchError ||
           validationError instanceof CreatedPullInvariantError) && operationOwnsPull(alreadyOpen)) {
           await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" });
+          if (validationError instanceof CommitMismatchError) {
+            await releaseOperationPull(alreadyOpen.number);
+          }
         }
         throw validationError;
       }
@@ -415,8 +444,23 @@ export default defineTool({
         "GET",
         `${root}/git/ref/heads/${branchPath}`,
       );
-      await assertMatchingCommit(existingRef.object.sha, await liveBaseSha());
-      const pull = await createPull(baseBranch, existingRef.object.sha);
+      let existingSha = existingRef.object.sha;
+      const currentBase = await liveBaseSha();
+      try {
+        await assertMatchingCommit(existingSha, currentBase);
+      } catch (error) {
+        if (!(error instanceof CommitMismatchError)) throw error;
+        await approvedCommitBase(existingSha);
+        const refreshedTree = await buildExpectedTree(currentBase);
+        const refreshed = await request<{ sha: string }>("POST", `${root}/git/commits`, {
+          message: commitMessageFor(currentBase), tree: refreshedTree.sha, parents: [currentBase],
+        });
+        await request("PATCH", `${root}/git/refs/heads/${branchPath}`, {
+          sha: refreshed.sha, force: true,
+        });
+        existingSha = refreshed.sha;
+      }
+      const pull = await createPull(baseBranch, existingSha);
       return {
         owner: input.owner,
         repo: input.repo,

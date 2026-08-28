@@ -172,10 +172,14 @@ export default githubChannel({
       const claim = trustedCiClaim(ctx);
       if (!claim) {
         if (!data.message) return;
+        const safeMessage = data.message.replace(
+          /<!--\s*eve-(?:ci-result|reply|change-operation):[^>]*-->/gi,
+          "",
+        );
         const marker = `<!-- eve-reply:${ctx.session.id}:${ctx.session.turn.id} -->`;
-        const truncated = data.message.length + marker.length + 2 > 60_000;
+        const truncated = safeMessage.length + marker.length + 2 > 60_000;
         const suffix = `${truncated ? "\n\n_Output truncated to fit one GitHub comment._" : ""}\n\n${marker}`;
-        const body = `${data.message.slice(0, 60_000 - suffix.length)}${suffix}`;
+        const body = `${safeMessage.slice(0, 60_000 - suffix.length)}${suffix}`;
         if (channel.thread.kind === "review_thread") {
           let existingCommentId: number | undefined;
           if (channel.state.pullRequestNumber) {
