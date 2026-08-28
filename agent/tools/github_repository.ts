@@ -19,13 +19,14 @@ const inputSchema = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("metadata"), ...repository }),
   z.object({ operation: z.literal("pull_request"), ...repository, number: z.number().int().positive() }),
   z.object({ operation: z.literal("tree"), ...repository, ref: z.string().min(1).max(200) }),
+  z.object({ operation: z.literal("directory"), ...repository, ref: z.string().min(1).max(200), path: z.string().max(1_000).default("") }),
   z.object({ operation: z.literal("read_file"), ...repository, ref: z.string().min(1).max(200), path: z.string().min(1).max(1_000) }),
   z.object({ operation: z.literal("checks"), ...repository, ref: z.string().min(1).max(200) }),
 ]);
 
 export default defineTool({
   description:
-    "Read metadata, a pull request, a recursive tree, one text file, or CI checks from any repository accessible to the configured GitHub connector. This tool never mutates GitHub.",
+    "Read metadata, a pull request, a recursive tree, a navigable directory, one text file, or CI checks from any repository accessible to the configured GitHub connector. This tool never mutates GitHub.",
   inputSchema,
   async execute(input, ctx) {
     if ("path" in input && (input.path.startsWith("/") || input.path.split("/").includes(".."))) {
@@ -39,6 +40,7 @@ export default defineTool({
         case "metadata": return root;
         case "pull_request": return `${root}/pulls/${input.number}`;
         case "tree": return `${root}/git/trees/${encodeURIComponent(input.ref)}?recursive=1`;
+        case "directory": return `${root}/contents/${input.path.split("/").filter(Boolean).map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(input.ref)}`;
         case "read_file": return `${root}/contents/${input.path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(input.ref)}`;
         case "checks": return "";
       }

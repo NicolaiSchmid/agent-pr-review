@@ -423,9 +423,6 @@ export default defineTool({
         throw new Error("Refusing to recover a pull request that is no longer a draft");
       }
       if (alreadyOpen.title !== input.title || (alreadyOpen.body ?? "") !== operationBody) {
-        if (operation.pull_request_number === alreadyOpen.number) {
-          await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" }, false);
-        }
         throw new Error("Refusing to recover a pull request with different title or body");
       }
       await claimOperationPull(alreadyOpen.number);
@@ -434,16 +431,13 @@ export default defineTool({
         await assertMatchingCommit(alreadyOpen.head.sha, await liveBaseSha());
         validatedOpen = await revalidateRecoveredPull(alreadyOpen.number, alreadyOpen.head.sha);
       } catch (validationError) {
-        if ((validationError instanceof CommitMismatchError ||
-          validationError instanceof CreatedPullInvariantError) && operationOwnsPull(alreadyOpen)) {
+        if (validationError instanceof CommitMismatchError && operationOwnsPull(alreadyOpen)) {
           if (validationError instanceof CommitMismatchError &&
             !await store.markRetryableClosure(operation.id, alreadyOpen.number)) {
             throw new Error("Could not fence stale-base pull request cleanup");
           }
           await request("PATCH", `${root}/pulls/${alreadyOpen.number}`, { state: "closed" }, false);
-          if (validationError instanceof CommitMismatchError) {
-            await releaseOperationPull(alreadyOpen.number);
-          }
+          await releaseOperationPull(alreadyOpen.number);
         }
         throw validationError;
       }
