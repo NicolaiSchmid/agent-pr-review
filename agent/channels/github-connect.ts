@@ -357,18 +357,18 @@ export default githubChannel({
               path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${existingCommentId}`,
               body: { body },
             });
-            await store.recordResultComment(claim.taskId, claim.leaseToken, existingCommentId);
+            await store.recordResultComment(claim.taskId, claim.leaseToken, existingCommentId, body);
           } catch (error) {
             if ((error as { status?: number }).status !== 404 ||
               !await store.replaceMissingResultComment(
                 claim.taskId, claim.leaseToken, existingCommentId,
               )) throw error;
             const posted = await channel.thread.post(body);
-            await store.recordResultComment(claim.taskId, claim.leaseToken, posted.id);
+            await store.recordResultComment(claim.taskId, claim.leaseToken, posted.id, body);
           }
         } else {
           const posted = await channel.thread.post(body);
-          await store.recordResultComment(claim.taskId, claim.leaseToken, posted.id);
+          await store.recordResultComment(claim.taskId, claim.leaseToken, posted.id, body);
         }
         const stillCurrent = await canPublishCiTask(channel, claim.taskId, claim.leaseToken);
         const finalCi = await hostCiStatus(channel, channel.state.headSha);

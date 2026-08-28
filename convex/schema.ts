@@ -37,6 +37,7 @@ export default defineSchema({
     ciConclusion: v.optional(v.union(v.literal("success"), v.literal("failure"))),
     resultCommentId: v.optional(v.number()), resultPostClaim: v.optional(v.string()),
     resultPostClaimAt: v.optional(v.number()),
+    resultCommentBody: v.optional(v.string()),
     deadlineAt: v.optional(v.number()), updatedAt: v.number(),
   }).index("by_external_id", ["externalId"])
     .index("by_conversation_head_key", ["conversationHead"])

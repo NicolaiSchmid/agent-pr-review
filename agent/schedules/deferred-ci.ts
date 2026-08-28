@@ -201,7 +201,7 @@ export default defineSchedule({
                   : current.result_state === "superseded"
                     ? "CI result superseded because the pull request or active task changed."
                     : current.result_state === "completed"
-                      ? `Host-verified CI outcome: ${(current.conclusion ?? "success").toUpperCase()}.`
+                      ? current.body ?? `Host-verified CI outcome: ${(current.conclusion ?? "success").toUpperCase()}.`
                     : "CI was rerun for this commit; the result is pending revalidation.",
               );
               if (current.result_state !== "completed") {

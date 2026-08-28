@@ -242,6 +242,9 @@ export default defineTool({
       "GET",
       `${root}/git/ref/heads/${baseBranch.split("/").map(encodeURIComponent).join("/")}`,
     );
+    const canonicalFiles = [...input.files].sort((left, right) =>
+      left.path.localeCompare(right.path)
+    );
     const operationFingerprint = createHash("sha256").update(JSON.stringify({
       owner: input.owner.toLowerCase(),
       repo: input.repo.toLowerCase(),
@@ -250,7 +253,7 @@ export default defineTool({
       title: input.title,
       body: input.body,
       commitMessage: input.commitMessage,
-      files: input.files,
+      files: canonicalFiles,
     })).digest("hex");
     const operation = await store.getOrCreateOperation<{
       id: string; branch: string; pull_request_number: number | null; retryable_closure: boolean;
@@ -286,7 +289,7 @@ export default defineTool({
       title: input.title,
       body: input.body,
       commitMessage: input.commitMessage,
-      files: input.files,
+      files: canonicalFiles,
     })).digest("hex");
     const commitMessageFor = (baseSha: string) =>
       `${input.commitMessage}\n\nEve-Change-Fingerprint: ${fingerprintFor(baseSha)}`;
