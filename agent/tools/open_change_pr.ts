@@ -93,7 +93,7 @@ export default defineTool({
       return (await response.json()) as T;
     };
 
-    const branchPath = input.branch.split("/").map(encodeURIComponent).join("/");
+    const branchPathFor = (branch: string) => branch.split("/").map(encodeURIComponent).join("/");
     type ListedPull = {
       number: number;
       html_url: string;
@@ -107,7 +107,7 @@ export default defineTool({
       for (let page = 1; ; page += 1) {
         const batch = await request<ListedPull[]>(
           "GET",
-          `${root}/pulls?state=open&head=${encodeURIComponent(`${input.owner}:${input.branch}`)}${baseBranch ? `&base=${encodeURIComponent(baseBranch)}` : ""}&per_page=100&page=${page}`,
+          `${root}/pulls?state=open&head=${encodeURIComponent(`${input.owner}:${activeBranch}`)}${baseBranch ? `&base=${encodeURIComponent(baseBranch)}` : ""}&per_page=100&page=${page}`,
         );
         pulls.push(...batch);
         if (batch.length < 100) return pulls;
@@ -120,7 +120,7 @@ export default defineTool({
         const pull = await request<{ number: number; html_url: string }>("POST", `${root}/pulls`, {
           title: input.title,
           body: operationBody,
-          head: input.branch,
+          head: activeBranch,
           base: baseBranch,
           draft: true,
         });
@@ -254,12 +254,13 @@ export default defineTool({
       files: input.files,
     })).digest("hex");
     const operation = await store.getOrCreateOperation<{
-      id: string; pull_request_number: number | null; retryable_closure: boolean;
+      id: string; branch: string; pull_request_number: number | null; retryable_closure: boolean;
     }>({
       externalId: randomUUID(), requestFingerprint: operationFingerprint,
       repositoryOwner: input.owner.toLowerCase(), repositoryName: input.repo.toLowerCase(),
       branch: input.branch,
     });
+    let activeBranch = operation.branch;
     const operationBody = `${input.body}\n\n<!-- eve-change-operation:${operation.id} -->`;
     const operationOwnsPull = (pull: { number: number; body: string | null }) =>
       (pull.body ?? "") === operationBody &&
@@ -452,7 +453,7 @@ export default defineTool({
         repo: input.repo,
         number: validatedOpen.number,
         url: validatedOpen.html_url,
-        branch: input.branch,
+        branch: activeBranch,
         commitSha: validatedOpen.head.sha,
         draft: validatedOpen.draft,
         recovered: true,
@@ -461,7 +462,7 @@ export default defineTool({
     try {
       const existingRef = await request<{ object: { sha: string } }>(
         "GET",
-        `${root}/git/ref/heads/${branchPath}`,
+        `${root}/git/ref/heads/${branchPathFor(activeBranch)}`,
       );
       let existingSha = existingRef.object.sha;
       const currentBase = await liveBaseSha();
@@ -470,14 +471,28 @@ export default defineTool({
       } catch (error) {
         if (!(error instanceof CommitMismatchError)) throw error;
         await approvedCommitBase(existingSha);
-        const refreshedTree = await buildExpectedTree(currentBase);
-        const refreshed = await request<{ sha: string }>("POST", `${root}/git/commits`, {
-          message: commitMessageFor(currentBase), tree: refreshedTree.sha, parents: [currentBase],
-        });
-        await request("PATCH", `${root}/git/refs/heads/${branchPath}`, {
-          sha: refreshed.sha, force: true,
-        });
-        existingSha = refreshed.sha;
+        const nextBranch = `${input.branch.slice(0, 165)}-retry-${fingerprintFor(currentBase).slice(0, 12)}`;
+        if (!await store.moveOperationBranch(operation.id, activeBranch, nextBranch)) {
+          throw new Error("Change operation branch changed during stale-base recovery");
+        }
+        activeBranch = nextBranch;
+        try {
+          const successor = await request<{ object: { sha: string } }>(
+            "GET", `${root}/git/ref/heads/${branchPathFor(activeBranch)}`,
+          );
+          await assertMatchingCommit(successor.object.sha, currentBase);
+          existingSha = successor.object.sha;
+        } catch (refError) {
+          if (!(refError instanceof GitHubRequestError) || refError.status !== 404) throw refError;
+          const refreshedTree = await buildExpectedTree(currentBase);
+          const refreshed = await request<{ sha: string }>("POST", `${root}/git/commits`, {
+            message: commitMessageFor(currentBase), tree: refreshedTree.sha, parents: [currentBase],
+          });
+          await request("POST", `${root}/git/refs`, {
+            ref: `refs/heads/${activeBranch}`, sha: refreshed.sha,
+          });
+          existingSha = refreshed.sha;
+        }
       }
       const pull = await createPull(baseBranch, existingSha);
       return {
@@ -485,7 +500,7 @@ export default defineTool({
         repo: input.repo,
         number: pull.number,
         url: pull.html_url,
-        branch: input.branch,
+        branch: activeBranch,
         commitSha: pull.commitSha,
         draft: pull.draft,
         recovered: true,
@@ -502,14 +517,14 @@ export default defineTool({
     let createdRef = true;
     try {
       await request("POST", `${root}/git/refs`, {
-        ref: `refs/heads/${input.branch}`,
+        ref: `refs/heads/${activeBranch}`,
         sha: commit.sha,
       });
     } catch (error) {
       if (!(error instanceof GitHubRequestError) || error.status !== 422) throw error;
       let concurrent: { object: { sha: string } };
       try {
-        concurrent = await request("GET", `${root}/git/ref/heads/${branchPath}`);
+        concurrent = await request("GET", `${root}/git/ref/heads/${branchPathFor(activeBranch)}`);
       } catch {
         throw error;
       }
@@ -523,7 +538,7 @@ export default defineTool({
       repo: input.repo,
       number: pull.number,
       url: pull.html_url,
-      branch: input.branch,
+      branch: activeBranch,
       commitSha: pull.commitSha,
       draft: pull.draft,
       recovered: !createdRef,

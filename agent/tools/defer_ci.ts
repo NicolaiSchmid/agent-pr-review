@@ -18,23 +18,32 @@ export default defineTool({
     headSha: z.string().regex(/^[0-9a-f]{40}$/i),
   }),
   async execute(input, ctx) {
-    if (ctx.session.auth.current?.authenticator !== "github-webhook") {
+    const auth = ctx.session.auth.current;
+    if (auth?.authenticator !== "github-webhook") {
       throw new Error("CI deferral currently requires a GitHub PR conversation; Slack deferral is not yet supported");
     }
-    if (ctx.session.auth.current.attributes.conversation_kind !== "pull_request") {
-      throw new Error("CI deferral must be requested from the PR timeline; proactive inline review-thread continuation is not supported");
-    }
-    const authenticatedRepository = ctx.session.auth.current.attributes.repository;
-    const authenticatedPullRequest = Number(ctx.session.auth.current.attributes.pull_request_number);
-    if (
-      typeof authenticatedRepository !== "string" ||
-      authenticatedRepository.toLowerCase() !== `${input.owner}/${input.repo}`.toLowerCase() ||
-      authenticatedPullRequest !== input.pullRequestNumber
-    ) {
+    const attributes = auth.attributes;
+    const nativeConversation = auth.principalType === "user" &&
+      attributes.conversation_kind === "pull_request" &&
+      typeof attributes.repository === "string" &&
+      attributes.repository.toLowerCase() === `${input.owner}/${input.repo}`.toLowerCase() &&
+      Number(attributes.pull_request_number) === input.pullRequestNumber;
+    const legacyWebhook = auth.principalType === "service" &&
+      auth.principalId === "github-webhook" &&
+      typeof attributes.owner === "string" &&
+      typeof attributes.repo === "string" &&
+      attributes.owner.toLowerCase() === input.owner.toLowerCase() &&
+      attributes.repo.toLowerCase() === input.repo.toLowerCase() &&
+      Number(attributes.number) === input.pullRequestNumber &&
+      typeof attributes.headSha === "string" &&
+      attributes.headSha.toLowerCase() === input.headSha.toLowerCase();
+    if (!nativeConversation && !legacyWebhook) {
       throw new Error("CI deferral target must match the authenticated pull request conversation");
     }
     const { token } = await ctx.getToken(githubAuth);
-    await requireRepositoryPermission(ctx, token, input.owner, input.repo, "read");
+    if (!legacyWebhook) {
+      await requireRepositoryPermission(ctx, token, input.owner, input.repo, "read");
+    }
     const response = await fetch(
       `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}`,
       { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" } },
@@ -55,7 +64,7 @@ export default defineTool({
     const conversationId = randomUUID();
     const taskId = randomUUID();
     const key = `github:${repositoryId}#${input.pullRequestNumber}`;
-    const installation = ctx.session.auth.current?.attributes.installation_id;
+    const installation = legacyWebhook ? attributes.installationId : attributes.installation_id;
     const durableTaskId = await store.deferCi({
       conversationId, taskId, conversationKey: key, repositoryId,
       repositoryOwner: input.owner, repositoryName: input.repo,

@@ -55,6 +55,7 @@ export const store = {
   claimOperationPull: (id: string, number: number) => convex().mutation(mutation("claimOperationPull"), args({ id, number })) as Promise<boolean>,
   markRetryableClosure: (id: string, number: number) => convex().mutation(mutation("markRetryableClosure"), args({ id, number })) as Promise<boolean>,
   releaseOperationPull: (id: string, number: number) => convex().mutation(mutation("releaseOperationPull"), args({ id, number })) as Promise<boolean>,
+  moveOperationBranch: (id: string, expectedBranch: string, nextBranch: string) => convex().mutation(mutation("moveOperationBranch"), args({ id, expectedBranch, nextBranch })) as Promise<boolean>,
   holdRerun: <T>(repositoryId: string, headSha: string) => convex().mutation(mutation("holdRerun"), args({ repositoryId, headSha })) as Promise<T>,
   resolveRerunPull: <T>(repositoryId: string, pullRequestNumber: number, headSha: string, disposition: "valid" | "cancelled" | "superseded") => convex().mutation(mutation("resolveRerunPull"), args({ repositoryId, pullRequestNumber, headSha, disposition })) as Promise<T>,
   acknowledgeRerunCleanup: (taskId: string) => convex().mutation(mutation("acknowledgeRerunCleanup"), args({ taskId })),
