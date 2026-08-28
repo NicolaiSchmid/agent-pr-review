@@ -240,6 +240,7 @@ export default defineSchedule({
           const cleanup = await store.resolveRerunPull<Array<{
             id: string; pull_request_number: number;
             result_state: "reopened" | "superseded" | "cancelled";
+            result_comment_id: number | null;
           }>>(task.repository_id, task.pull_request_number, task.head_sha, disposition);
           for (const item of cleanup) {
             await cleanupStaleResult(
@@ -247,6 +248,7 @@ export default defineSchedule({
                 ...task,
                 id: item.id,
                 pull_request_number: item.pull_request_number,
+                result_comment_id: item.result_comment_id,
               },
               repository,
               item.result_state === "cancelled"
@@ -255,7 +257,24 @@ export default defineSchedule({
                   ? "CI result superseded because the pull request head changed."
                   : "CI returned to a pending state and is awaiting revalidation.",
             );
-            await store.acknowledgeRerunCleanup(item.id, item.result_state);
+            const acknowledged = await store.acknowledgeRerunCleanup(item.id, item.result_state);
+            if (!acknowledged) {
+              const current = await store.rerunDisposition(item.id);
+              if (current && current.result_state !== item.result_state) {
+                await cleanupStaleResult(
+                  { ...task, id: item.id, pull_request_number: item.pull_request_number, result_comment_id: item.result_comment_id },
+                  repository,
+                  current.result_state === "cancelled"
+                    ? "CI result finalized because the pull request is no longer open."
+                    : current.result_state === "superseded"
+                      ? "CI result superseded because the pull request or active task changed."
+                      : current.body ?? "CI returned to a pending state and is awaiting revalidation.",
+                );
+                if (current.result_state === "reopened" || current.result_state === "superseded" || current.result_state === "cancelled") {
+                  await store.acknowledgeRerunCleanup(item.id, current.result_state);
+                }
+              }
+            }
           }
         }));
 
