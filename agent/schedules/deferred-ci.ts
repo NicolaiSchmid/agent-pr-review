@@ -17,6 +17,8 @@ interface DeferredCiTask {
   lease_token: string;
 }
 
+type CompletedCiTask = Omit<DeferredCiTask, "lease_token">;
+
 const release = async (taskId: string, leaseToken: string) => {
   await store.settleLease(taskId, leaseToken, "waiting_for_ci");
 };
@@ -117,6 +119,36 @@ const currentPullRequestHead = async (
   return { headSha: pull.head.sha.toLowerCase(), open: pull.state === "open" && !pull.merged };
 };
 
+const currentCiIsTerminal = async (
+  task: CompletedCiTask,
+  repository: { owner: string; repo: string },
+) => {
+  const token = await githubToken(task as DeferredCiTask);
+  const root = `${env.githubApiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/commits/${task.head_sha}`;
+  const headers = { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "eve-engineering-agent" };
+  const [checksResponse, statusesResponse] = await Promise.all([
+    fetch(`${root}/check-runs?per_page=100`, { headers }),
+    fetch(`${root}/status?per_page=100`, { headers }),
+  ]);
+  if (!checksResponse.ok || !statusesResponse.ok) {
+    throw new Error(`Could not revalidate completed CI: ${checksResponse.status}/${statusesResponse.status}`);
+  }
+  const checks = await checksResponse.json() as {
+    total_count: number;
+    check_runs: Array<{ status: string; conclusion: string | null }>;
+  };
+  const statuses = await statusesResponse.json() as {
+    total_count: number;
+    statuses: Array<{ state: string }>;
+  };
+  if (checks.check_runs.length < checks.total_count || statuses.statuses.length < statuses.total_count) {
+    throw new Error("Completed CI revalidation exceeded its 100-context bound");
+  }
+  return checks.total_count + statuses.total_count > 0 &&
+    checks.check_runs.every((check) => check.status === "completed" && check.conclusion !== null) &&
+    statuses.statuses.every((status) => status.state !== "pending");
+};
+
 const drainSession = async (stream: ReadableStream<unknown>): Promise<void> => {
   const reader = stream.getReader();
   for (;;) {
@@ -130,6 +162,40 @@ export default defineSchedule({
   run({ receive, waitUntil, appAuth }) {
     waitUntil(
       (async () => {
+        const completed = await store.claimCompletedForRevalidation<CompletedCiTask[]>(25);
+        await Promise.allSettled(completed.map(async (task) => {
+          const repository = await resolveRepository(task as DeferredCiTask);
+          const pull = await currentPullRequestHead(task as DeferredCiTask, repository);
+          const disposition = !pull.open
+            ? "cancelled" as const
+            : pull.headSha !== task.head_sha.toLowerCase()
+              ? "superseded" as const
+              : "valid" as const;
+          if (disposition === "valid" && await currentCiIsTerminal(task, repository)) return;
+          await store.holdRerun(task.repository_id, task.head_sha);
+          const cleanup = await store.resolveRerunPull<Array<{
+            id: string; pull_request_number: number;
+            result_state: "reopened" | "superseded" | "cancelled";
+          }>>(task.repository_id, task.pull_request_number, task.head_sha, disposition);
+          for (const item of cleanup) {
+            await cleanupStaleResult(
+              {
+                ...task,
+                id: item.id,
+                pull_request_number: item.pull_request_number,
+                lease_token: "revalidation",
+              },
+              repository,
+              item.result_state === "cancelled"
+                ? "CI result finalized because the pull request is no longer open."
+                : item.result_state === "superseded"
+                  ? "CI result superseded because the pull request head changed."
+                  : "CI returned to a pending state and is awaiting revalidation.",
+            );
+            await store.acknowledgeRerunCleanup(item.id, item.result_state);
+          }
+        }));
+
         const tasks = await store.claimDeferred<DeferredCiTask[]>(25, Date.now() - 15 * 60_000);
 
         await Promise.allSettled(

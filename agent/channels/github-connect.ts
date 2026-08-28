@@ -425,7 +425,8 @@ export default githubChannel({
           repositoryId, pullRequestNumber, headSha, disposition,
         ));
       }
-      for (const task of completed) {
+      for (let cleanupIndex = 0; cleanupIndex < completed.length; cleanupIndex += 1) {
+        const task = completed[cleanupIndex]!;
         const marker = `<!-- eve-ci-result:${task.id} -->`;
         let commentId: number | undefined;
         for (let page = 1; !commentId; page += 1) {
@@ -451,7 +452,25 @@ export default githubChannel({
                 : "CI was rerun for this commit; the result is pending revalidation."}\n\n${marker}` },
           });
         }
-        await store.acknowledgeRerunCleanup(task.id);
+        const acknowledged = await store.acknowledgeRerunCleanup(
+          task.id, task.result_state,
+        );
+        if (!acknowledged) {
+          const pull = await ctx.github.request<{
+            head: { sha: string }; merged: boolean; state: string;
+          }>({
+            method: "GET",
+            path: `/repos/${encodeURIComponent(ctx.repository.owner)}/${encodeURIComponent(ctx.repository.name)}/pulls/${task.pull_request_number}`,
+          });
+          const disposition = pull.body.state !== "open" || pull.body.merged
+            ? "cancelled" as const
+            : pull.body.head.sha.toLowerCase() !== headSha
+              ? "superseded" as const
+              : "valid" as const;
+          completed.push(...await store.resolveRerunPull<typeof completed>(
+            repositoryId, task.pull_request_number, headSha, disposition,
+          ));
+        }
       }
       return null;
     }
