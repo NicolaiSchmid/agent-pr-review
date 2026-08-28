@@ -181,6 +181,25 @@ export default defineTool({
         return { ...validated, commitSha: validated.head.sha };
       } catch (error) {
         if (createdPullNumber) {
+          if (error instanceof CommitMismatchError) {
+            const created = await request<{ head: { sha: string }; state: string }>(
+              "GET", `${root}/pulls/${createdPullNumber}`, undefined, false,
+            );
+            let generatedBase: string | null = null;
+            try {
+              generatedBase = await approvedCommitBase(created.head.sha);
+            } catch {
+              // A user-modified head is intentionally preserved.
+            }
+            if (created.state === "open" && generatedBase &&
+              generatedBase !== await liveBaseSha(false)) {
+              if (!await store.markRetryableClosure(operation.id, createdPullNumber)) {
+                throw new Error("Could not fence stale-base pull request cleanup");
+              }
+              await request("PATCH", `${root}/pulls/${createdPullNumber}`, { state: "closed" }, false);
+              await releaseOperationPull(createdPullNumber);
+            }
+          }
           throw error;
         }
         const recoveryPulls = await listPulls(undefined, false);
@@ -273,9 +292,11 @@ export default defineTool({
     })).digest("hex");
     const commitMessageFor = (baseSha: string) =>
       `${input.commitMessage}\n\nEve-Change-Fingerprint: ${fingerprintFor(baseSha)}`;
-    const liveBaseSha = async () => (await request<{ object: { sha: string } }>(
+    const liveBaseSha = async (cancellable = true) => (await request<{ object: { sha: string } }>(
       "GET",
       `${root}/git/ref/heads/${baseBranch.split("/").map(encodeURIComponent).join("/")}`,
+      undefined,
+      cancellable,
     )).object.sha;
     const buildExpectedTree = async (baseSha: string) => {
       const baseCommit = await request<{ tree: { sha: string } }>(

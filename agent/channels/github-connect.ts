@@ -271,7 +271,22 @@ export default githubChannel({
       if (!claimed) return;
       const marker = `<!-- eve-ci-result:${claim.taskId} -->`;
       const compensatePublishedComment = async (reason: string) => {
-        for (let page = 1; ; page += 1) {
+        const current = await store.rerunDisposition(claim.taskId);
+        const newerBody = current?.lease_token !== claim.leaseToken &&
+          (current?.result_state === "publishing" || current?.result_state === "completed")
+          ? current.body
+          : null;
+        const replacement = newerBody ?? `${reason}\n\n${marker}`;
+        let persistedId = current?.comment_id ?? undefined;
+        if (persistedId) {
+          await channel.github.request({
+            method: "PATCH",
+            path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${persistedId}`,
+            body: { body: replacement },
+          });
+          return;
+        }
+        for (let page = 1; page <= 30; page += 1) {
           const comments = await channel.github.request<Array<{
             id: number; body?: string; user?: { login?: string; type?: string };
           }>>({
@@ -285,7 +300,7 @@ export default githubChannel({
             await channel.github.request({
               method: "PATCH",
               path: `/repos/${encodeURIComponent(channel.repository.owner)}/${encodeURIComponent(channel.repository.name)}/issues/comments/${published.id}`,
-              body: { body: `${reason}\n\n${marker}` },
+              body: { body: replacement },
             });
             return;
           }
@@ -319,8 +334,11 @@ export default githubChannel({
           ? "\n\nContinuation output (the host verdict above is authoritative):\n\n"
           : "";
         const suffix = `\n\n${marker}`;
-        const available = 60_000 - prefix.length - continuationLabel.length - suffix.length;
-        const body = `${prefix}${continuationLabel}${continuation.slice(0, Math.max(0, available))}${suffix}`;
+        const truncation = "\n\n_Output truncated to fit one GitHub comment._";
+        const baseAvailable = 60_000 - prefix.length - continuationLabel.length - suffix.length;
+        const truncated = continuation.length > baseAvailable;
+        const available = baseAvailable - (truncated ? truncation.length : 0);
+        const body = `${prefix}${continuationLabel}${continuation.slice(0, Math.max(0, available))}${truncated ? truncation : ""}${suffix}`;
         const immediateCi = await hostCiStatus(channel, channel.state.headSha);
         if (
           !await canPublishCiTask(channel, claim.taskId, claim.leaseToken) ||
